@@ -10,7 +10,7 @@ window_context.py — 窗口生命周期状态（单持仓版）
 - 单单持仓：只允许一次入场，入场后只做止盈止损/窗口结算
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
