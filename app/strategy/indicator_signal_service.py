@@ -1046,6 +1046,17 @@ class IndicatorSignalService:
         # The baseline is populated by get_signal() calls; read it without modifying.
         cvd_hist = self._cvd_baseline()
         cvd_z_ro = self._cvd_z_score_ro(abs(cvd_val)) if cvd_val != 0.0 else 0.0
+
+        # OI history — append current value before reading for change calculation
+        oi_h = self._oi_hist()
+        if oi_val and oi_val > 0:
+            oi_h.append(float(oi_val))
+            if len(oi_h) > _MAX_OI_HISTORY:
+                oi_h.pop(0)
+        oi_change = 0.0
+        if len(oi_h) >= 2 and oi_h[-2] > 0:
+            oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
+
         return {
             "asset": self.asset,
             "spots": {"btc": spot_btc, "eth": spot_eth},
