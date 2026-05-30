@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>控制台 - Polymarket</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a14; color: #e0e0e0; }
+  nav { background: #12122a; border-bottom: 1px solid #1e1e3a; padding: 0 24px; display: flex; align-items: center; gap: 8px; height: 56px; }
+  nav a { color: #a0a0b0; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
+  nav a:hover, nav a.active { background: #1e1e3a; color: #a78bfa; }
+  nav .brand { font-weight: 700; font-size: 16px; color: #7c3aed; margin-right: 16px; }
+  nav .nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .nav-status { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .nav-user { display: flex; align-items: center; gap: 8px; }
+  .nav-user-info { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 6px; }
+  .nav-user-info .user-icon { font-size: 14px; }
+  .nav-user-info .username { color: #a0a0b0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .logout-btn { font-size: 12px; color: #6b7280; background: none; border: 1px solid #2a2a4a; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+  .logout-btn:hover { color: #ef4444; border-color: #7f1d1d; background: #1e0e0e; }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; animation: pulse 2s infinite; }
+  .live-dot.offline { background: #6b7280; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ── Strategy Toggle ──────────────────────────────────────────────────── */
+  .strategy-toggle { display: flex; align-items: center; gap: 8px; }
+  .toggle-label { font-size: 12px; color: #6b7280; }
+  .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: #2a2a4a; border-radius: 24px; transition: 0.3s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #6b7280; border-radius: 50%; transition: 0.3s; }
+  .toggle-switch input:checked + .toggle-slider { background: #10b981; }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: #fff; }
+  .toggle-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+  .toggle-status.running { background: #064e3b; color: #34d399; }
+  .toggle-status.stopped { background: #1e1e3a; color: #6b7280; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+  /* ── Stats Row ── */
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 20px; }
+  .stat-label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .stat-value { font-size: 28px; font-weight: 700; }
+  .stat-value.green { color: #10b981; }
+  .stat-value.red { color: #ef4444; }
+  .stat-value.purple { color: #a78bfa; }
+  .stat-value.orange { color: #fb923c; }
+  .stat-sub { font-size: 12px; color: #6b7280; margin-top: 4px; }
+
+  /* ── Price Cards ── */
+  .price-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .price-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 20px; }
+  .price-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .price-card-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .price-card-title .asset-icon { font-size: 18px; }
+  .price-card-title .mode-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }
+  .mode-tag.up { background: #064e3b; color: #34d399; }
+  .mode-tag.down { background: #450a0a; color: #f87171; }
+
+  /* Market Regime Panel — removed in simplified version, kept for layout compatibility */
+  /* Regime CSS removed in simplified version */
+  .regime-grid,
+  .regime-card,
+  .regime-card-header,
+  .regime-card-title,
+  .regime-badge,
+  .regime-badge .badge-dot,
+  .regime-attrs,
+  .regime-attr,
+  .regime-attr-label,
+  .regime-attr-value,
+  .regime-dir-chip,
+  .regime-dir-row,
+  .regime-progress,
+  .regime-progress-label,
+  .regime-progress-bar,
+  .regime-progress-fill,
+  .regime-desc,
+  .regime-hot-restart,
+  .regime-hot-restart .hr-icon { display: none !important; }
+  .regime-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 20px; }
+  .regime-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .regime-card-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .regime-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .regime-badge.range   { background: #064e3b; color: #34d399; }
+  .regime-badge.low_vol { background: #1c2a4a; color: #93c5fd; }
+  .regime-badge.trend   { background: #3b1a06; color: #fb923c; }
+  .regime-badge.unknown { background: #1e1e3a; color: #6b7280; }
+  .regime-badge .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .regime-attrs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .regime-attr { background: #0a0a14; border: 1px solid #1e1e3a; border-radius: 8px; padding: 12px; }
+  .regime-attr-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .regime-attr-value { font-size: 18px; font-weight: 700; color: #d1d5db; }
+  .regime-attr-value.good { color: #34d399; }
+  .regime-attr-value.warn { color: #fb923c; }
+  .regime-attr-value.neutral { color: #9ca3af; }
+  .regime-attr-value.up-dir    { color: #34d399; }
+  .regime-attr-value.down-dir  { color: #f87171; }
+  .regime-attr-value.neutral-dir { color: #9ca3af; }
+  .regime-dir-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 700; }
+  .regime-dir-chip.up-dir    { background: #064e3b; color: #34d399; }
+  .regime-dir-chip.down-dir  { background: #450a0a; color: #f87171; }
+  .regime-dir-chip.neutral-dir { background: #1e1e3a; color: #9ca3af; }
+  .regime-dir-row { margin-top: 12px; display: flex; flex-direction: column; }
+  .regime-dir-row .regime-attr-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+  .regime-progress { margin-top: 12px; }
+  .regime-progress-label { display: flex; justify-content: space-between; font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+  .regime-progress-bar { height: 4px; background: #1e1e3a; border-radius: 2px; overflow: hidden; }
+  .regime-progress-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+  .regime-progress-fill.range   { background: linear-gradient(90deg, #10b981, #34d399); }
+  .regime-progress-fill.low_vol { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+  .regime-progress-fill.trend   { background: linear-gradient(90deg, #f59e0b, #fb923c); }
+  .regime-progress-fill.unknown { background: #4b5563; }
+  .regime-desc { font-size: 12px; color: #9ca3af; margin-top: 10px; }
+  .regime-hot-restart { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: #0a0a14; border: 1px solid #1e1e3a; }
+  .regime-hot-restart .hr-icon { font-size: 14px; }
+  .hr-ok   { color: #34d399; }
+  .hr-warn { color: #fb923c; }
+  .hr-off  { color: #6b7280; }
+  .window-timer { font-size: 12px; color: #6b7280; }
+  .window-timer span { color: #a78bfa; font-weight: 600; }
+  .price-bar-wrap { margin-bottom: 12px; }
+  .price-bar-label { display: flex; justify-content: space-between; font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+  .price-bar-label span:nth-child(2), .price-bar-label span:nth-child(4) { color: #9ca3af; font-weight: 600; }
+  .price-bar { height: 10px; border-radius: 5px; overflow: hidden; display: flex; position: relative; }
+  .price-bar .bar-up { background: linear-gradient(90deg, #10b981, #059669); transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 5px 0 0 5px; position: relative; overflow: hidden; }
+  .price-bar .bar-down { background: linear-gradient(90deg, #ef4444, #dc2626); transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0 5px 5px 0; margin-left: -1px; }
+  .price-bar .bar-up::after, .price-bar .bar-down::after {
+    content: '';
+    position: absolute;
+    top: 0; left: -100%; width: 60%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+    animation: shimmer 2.5s ease-in-out infinite;
+  }
+  @keyframes shimmer { 0% { left: -100%; } 50%, 100% { left: 200%; } }
+
+  .price-card.flash-up { animation: flashGreen 0.5s ease-out; }
+  .price-card.flash-down { animation: flashRed 0.5s ease-out; }
+  @keyframes flashGreen { 0% { border-color: #10b981; box-shadow: 0 0 0 0 rgba(16,185,129,0.4); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,0.15); border-color: #10b981; } 100% { border-color: #1e1e3a; box-shadow: none; } }
+  @keyframes flashRed { 0% { border-color: #ef4444; box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow: 0 0 0 6px rgba(239,68,68,0.15); border-color: #ef4444; } 100% { border-color: #1e1e3a; box-shadow: none; } }
+  .price-tokens { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .token-item { background: #0a0a14; border: 1px solid #1e1e3a; border-radius: 8px; padding: 12px; }
+  .token-item.up { border-left: 3px solid #10b981; }
+  .token-item.down { border-left: 3px solid #ef4444; }
+  .token-item .token-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; display: flex; align-items: center; gap: 4px; }
+  .token-item .token-price { font-size: 22px; font-weight: 700; }
+  .token-item .token-price.up { color: #10b981; }
+  .token-item .token-price.down { color: #ef4444; }
+  .token-item .token-pct { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .section { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .section h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #d1d5db; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #6b7280; border-bottom: 1px solid #1e1e3a; }
+  td { padding: 8px 12px; border-bottom: 1px solid #1e1e3a; }
+  tr:hover td { background: #1a1a2e; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.UP { background: #064e3b; color: #34d399; }
+  .badge.DOWN { background: #450a0a; color: #f87171; }
+  .pnl-pos { color: #10b981; }
+  .pnl-neg { color: #ef4444; }
+  .no-data { text-align: center; color: #6b7280; padding: 20px; }
+
+  /* ── Time ── */
+  .time-bar { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; font-size: 12px; color: #6b7280; }
+  .time-bar .et-label { background: #1e1e3a; padding: 4px 8px; border-radius: 4px; }
+  .time-bar .countdown { color: #a78bfa; font-weight: 600; }
+
+  /* ── Mobile Responsive ── */
+  @media (max-width: 768px) {
+    nav { padding: 0 12px; gap: 4px; }
+    nav a { padding: 6px 10px; font-size: 13px; }
+    nav .brand { margin-right: 8px; font-size: 15px; }
+    nav .nav-right { gap: 4px; }
+    .container { padding: 16px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .stat-value { font-size: 22px; }
+    .price-grid { grid-template-columns: 1fr; gap: 12px; }
+    .regime-grid { grid-template-columns: 1fr; gap: 12px; }
+    .price-card { padding: 16px; }
+    .regime-card { padding: 16px; }
+    .price-card-title { font-size: 14px; }
+    .token-item .token-price { font-size: 20px; }
+    .section { padding: 16px; }
+    .section h2 { font-size: 14px; margin-bottom: 12px; }
+    table { font-size: 12px; }
+    th, td { padding: 6px 8px; }
+    .time-bar { flex-wrap: wrap; gap: 8px; font-size: 11px; }
+  }
+
+  @media (max-width: 540px) {
+    nav { height: 50px; }
+    nav a:not(.brand) { padding: 5px 8px; font-size: 12px; }
+    .container { padding: 12px; }
+    .stats-row { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-card { padding: 14px; }
+    .stat-value { font-size: 20px; }
+    .price-card-header { flex-wrap: wrap; gap: 8px; }
+    .window-timer { font-size: 11px; }
+    .price-tokens { gap: 8px; }
+    .token-item { padding: 10px; }
+    .token-item .token-price { font-size: 18px; }
+    .section { padding: 12px; }
+    .section h2 { font-size: 13px; }
+    .regime-grid { gap: 10px; }
+    .regime-card { padding: 12px; }
+    .regime-attrs { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .regime-attr { padding: 10px; }
+    .regime-attr-value { font-size: 16px; }
+  }
+
+  @media (max-width: 480px) {
+    nav { gap: 2px; }
+    nav a:not(.brand) { padding: 5px 6px; font-size: 12px; border-radius: 4px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .stat-card { padding: 12px; }
+    .stat-value { font-size: 18px; }
+    .stat-sub { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">Polymarket</span>
+  <a href="/" class="active">控制台</a>
+  <a href="/trades">交易记录</a>
+  <a href="/indicators">指标面板</a>
+  <a href="/config">配置</a>
+  <div class="nav-right">
+    <!-- Strategy Running Toggle -->
+    <div class="strategy-toggle" id="strategy-toggle" style="display:none">
+      <span class="toggle-label">策略</span>
+      <label class="toggle-switch" title="点击切换策略运行状态">
+        <input type="checkbox" id="strategy-checkbox" onchange="onStrategyToggle(this)">
+        <span class="toggle-slider"></span>
+      </label>
+      <span class="toggle-status stopped" id="strategy-status">已停止</span>
+    </div>
+    <div class="nav-status">
+      <span class="live-dot" id="ws-dot"></span>
+      <span id="ws-label">连接中</span>
+    </div>
+    <div class="nav-user">
+      <div class="nav-user-info" id="nav-user-info" style="display:none">
+        <span class="user-icon">&#128100;</span>
+        <span class="username" id="nav-username"></span>
+      </div>
+      <button class="logout-btn" id="nav-logout-btn" style="display:none" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+</nav>
+<div class="container">
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">总交易</div>
+      <div class="stat-value purple" id="total_trades">--</div>
+      <div class="stat-sub" id="win_rate_text">-- 胜率</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">总 PnL</div>
+      <div class="stat-value" id="total_pnl">--</div>
+      <div class="stat-sub">USDC</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">运行模式</div>
+      <div class="stat-value orange" id="mode_badge">--</div>
+      <div class="stat-sub" id="mode_detail">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">当前时间 (北京时间)</div>
+      <div class="stat-value purple" id="et_time">--:--:--</div>
+      <div class="stat-sub" id="window_end_text">窗口剩余 00:00</div>
+    </div>
+  </div>
+
+  <!-- BTC / ETH Price Cards -->
+  <div class="price-grid" id="price-grid">
+    <div class="price-card" id="btc-price-card">
+      <div class="price-card-header">
+        <div class="price-card-title">
+          <span class="asset-icon">₿</span>
+          <span>BTC UP/DOWN（Polymarket）</span>
+        </div>
+        <div class="window-timer">窗口结束 <span id="btcWindowEnd">--:--</span></div>
+      </div>
+      <div class="price-bar-wrap">
+        <div class="price-bar-label"><span>UP</span><span id="btcUpPct">0%</span><span>DOWN</span><span id="btcDnPct">0%</span></div>
+        <div class="price-bar"><div class="bar-up" id="btcBarUp" style="width:50%"></div><div class="bar-down" id="btcBarDn" style="width:50%"></div></div>
+      </div>
+      <div class="price-tokens">
+        <div class="token-item up">
+          <div class="token-label">UP 中间价</div>
+          <div class="token-price up" id="btcUpPrice">--</div>
+          <div class="token-pct">约 <span id="btcUpPct2">--</span>% 概率</div>
+        </div>
+        <div class="token-item down">
+          <div class="token-label">DOWN 中间价</div>
+          <div class="token-price down" id="btcDnPrice">--</div>
+          <div class="token-pct">约 <span id="btcDnPct2">--</span>% 概率</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="price-card" id="eth-price-card">
+      <div class="price-card-header">
+        <div class="price-card-title">
+          <span class="asset-icon">Ξ</span>
+          <span>ETH UP/DOWN（Polymarket）</span>
+        </div>
+        <div class="window-timer">窗口结束 <span id="ethWindowEnd">--:--</span></div>
+      </div>
+      <div class="price-bar-wrap">
+        <div class="price-bar-label"><span>UP</span><span id="ethUpPct">0%</span><span>DOWN</span><span id="ethDnPct">0%</span></div>
+        <div class="price-bar"><div class="bar-up" id="ethBarUp" style="width:50%"></div><div class="bar-down" id="ethBarDn" style="width:50%"></div></div>
+      </div>
+      <div class="price-tokens">
+        <div class="token-item up">
+          <div class="token-label">UP 中间价</div>
+          <div class="token-price up" id="ethUpPrice">--</div>
+          <div class="token-pct">约 <span id="ethUpPct2">--</span>% 概率</div>
+        </div>
+        <div class="token-item down">
+          <div class="token-label">DOWN 中间价</div>
+          <div class="token-price down" id="ethDnPrice">--</div>
+          <div class="token-pct">约 <span id="ethDnPct2">--</span>% 概率</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Positions -->
+  <div class="section">
+    <h2>当前持仓</h2>
+    <table>
+      <thead><tr><th>品种</th><th>方向</th><th>代币数量</th><th>均价</th><th>当前价</th><th>总投资</th><th>已补次数</th><th>窗口结束</th><th>浮动盈亏</th></tr></thead>
+      <tbody id="positions_tbody"><tr><td colspan="7" class="no-data">无持仓</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="section">
+    <h2>最近交易</h2>
+    <table>
+      <thead><tr><th>时间</th><th>品种</th><th>方向</th><th>入场价</th><th>均价</th><th>出场价</th><th>卖出时间</th><th>PnL %</th><th>PnL $</th><th>原因</th></tr></thead>
+      <tbody id="trades_tbody"><tr><td colspan="10" class="no-data">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('pm_token') || '';
+
+async function api(path, opts={}) {
+  const r = await fetch(API + path, {
+    ...opts,
+    headers: { ...opts.headers, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  if (r.status === 401) { window.location.href = '/login'; return null; }
+  return r.json();
+}
+
+// ── Strategy Running Toggle ─────────────────────────────────────────────
+let _strategyRunning = false;
+
+async function loadStrategyStatus() {
+  // Load on init; also called from auth check
+  const d = await api('/api/live/status');
+  if (!d) return;
+  const running = !!d.strategy_running;
+  _strategyRunning = running;
+  const toggle = document.getElementById('strategy-toggle');
+  const checkbox = document.getElementById('strategy-checkbox');
+  const statusEl = document.getElementById('strategy-status');
+  if (toggle) toggle.style.display = 'flex';
+  if (checkbox) checkbox.checked = running;
+  if (statusEl) {
+    statusEl.textContent = running ? '运行中' : '已停止';
+    statusEl.className = 'toggle-status ' + (running ? 'running' : 'stopped');
+  }
+}
+
+async function onStrategyToggle(checkbox) {
+  const want = checkbox.checked;
+  if (want) {
+    if (!confirm('确认开启策略？策略将开始检查市场并执行订单。')) {
+      checkbox.checked = false;
+      return;
+    }
+    const r = await api('/api/strategy/start', { method: 'POST' });
+    if (r && r.ok) {
+      _strategyRunning = true;
+      const statusEl = document.getElementById('strategy-status');
+      if (statusEl) { statusEl.textContent = '运行中'; statusEl.className = 'toggle-status running'; }
+    } else {
+      checkbox.checked = false;
+      alert('开启失败：' + (r && r.detail ? r.detail : '未知错误'));
+    }
+  } else {
+    if (!confirm('确认停止策略？停止后策略暂停，不再检查市场或下单。')) {
+      checkbox.checked = true;
+      return;
+    }
+    const r = await api('/api/strategy/stop', { method: 'POST' });
+    if (r && r.ok) {
+      _strategyRunning = false;
+      const statusEl = document.getElementById('strategy-status');
+      if (statusEl) { statusEl.textContent = '已停止'; statusEl.className = 'toggle-status stopped'; }
+    } else {
+      checkbox.checked = true;
+      alert('停止失败：' + (r && r.detail ? r.detail : '未知错误'));
+    }
+  }
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  const d = await api('/api/auth/me');
+  const userInfo = document.getElementById('nav-user-info');
+  const logoutBtn = document.getElementById('nav-logout-btn');
+  if (d) {
+    const name = d.username || '用户';
+    if (userInfo) {
+      userInfo.style.display = 'flex';
+      const nameEl = document.getElementById('nav-username');
+      if (nameEl) nameEl.textContent = name + (d.is_admin ? ' (管理员)' : '');
+    }
+    if (logoutBtn) logoutBtn.style.display = 'block';
+  } else {
+    if (userInfo) userInfo.style.display = 'none';
+    if (logoutBtn) logoutBtn.style.display = 'none';
+  }
+}
+
+async function doLogout() {
+  if (!confirm('确定要退出登录吗？')) return;
+  await fetch(API + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  localStorage.removeItem('pm_token');
+  window.location.href = '/login';
+}
+
+// ── Beijing time ────────────────────────────────────────────────────────────
+function getBETime() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+}
+
+function fmtBJ(d) {
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Shanghai' });
+}
+
+function fmtBJShort(d) {
+  if (!d) return '--';
+  var s = typeof d === 'string' ? d : d.toISOString();
+  // Strip trailing Z or +00:00 so we always append exactly one Z → correct UTC
+  var iso = s.endsWith('Z') ? s.slice(0, -1)
+       : s.includes('+') ? s.replace(/\+\d{2}:\d{2}$/, '')
+       : s;
+  return new Date(iso + 'Z').toLocaleTimeString('en-US', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZone: 'Asia/Shanghai',
+  });
+}
+
+function fmtBJStr(s) {
+  if (!s) return '--';
+  // Handles:
+  //   "2026-05-05T16:50:30"        -> strip TZ, treat as UTC
+  //   "2026-05-05T16:50:30Z"      -> strip Z, treat as UTC
+  //   "2026-05-05T16:50:30+00:00" -> strip TZ, treat as UTC
+  // All become "2026-05-05T16:50:30Z" -> correct UTC -> correct Beijing time
+  var iso = s.endsWith('Z') ? s.slice(0, -1)
+       : s.includes('+') ? s.replace(/\+\d{2}:\d{2}$/, '')
+       : s;
+  return new Date(iso + 'Z').toLocaleTimeString('en-US', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZone: 'Asia/Shanghai',
+  });
+}
+
+// Polymarket up/down slots are Unix-aligned (floor(now/windowSec)*windowSec), not "seconds since Beijing midnight".
+let _marketWindowSec = 900;
+
+function getWindowBounds() {
+  const winSec = Math.max(30, Number(_marketWindowSec) || 900);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const windowStartUnix = Math.floor(nowSec / winSec) * winSec;
+  const windowEndUnix = windowStartUnix + winSec;
+  const elapsed = nowSec - windowStartUnix;
+  const progress = Math.min(100, Math.max(0, (elapsed / winSec) * 100));
+  const startUtc = new Date(windowStartUnix * 1000);
+  const endUtc = new Date(windowEndUnix * 1000);
+  const secsLeft = Math.max(0, windowEndUnix - nowSec);
+  return {
+    progress,
+    elapsed,
+    secsLeft,
+    winSec,
+    startBj: startUtc,
+    endBj: endUtc,
+  };
+}
+
+function updateBJClock() {
+  const bj = getBETime();
+  const el = document.getElementById('et_time');
+  if (el) el.textContent = fmtBJ(bj);
+  const wb = getWindowBounds();
+  const cd = wb.secsLeft;
+  const el2 = document.getElementById('window_end_text');
+  if (el2) el2.textContent = '窗口剩余 ' + Math.floor(cd / 60) + ':' + String(Math.floor(cd % 60)).padStart(2, '0');
+}
+
+// ── Price Card Update (pred3 style: explicit IDs, null guard) ──────────
+const _prevUpMid = {};
+
+function flashCard(prefix, direction) {
+  const card = document.getElementById(prefix + '-price-card');
+  if (!card) return;
+  card.classList.remove('flash-up', 'flash-down');
+  void card.offsetWidth;
+  card.classList.add(direction === 'up' ? 'flash-up' : 'flash-down');
+  setTimeout(() => card.classList.remove('flash-up', 'flash-down'), 600);
+}
+
+function applyPrices(asset, m) {
+  const p = asset.toLowerCase();
+
+  const upPctEl   = document.getElementById(p + 'UpPct');
+  const barUpEl   = document.getElementById(p + 'BarUp');
+  const upPriceEl = document.getElementById(p + 'UpPrice');
+  const upPct2El  = document.getElementById(p + 'UpPct2');
+
+  const dnPctEl   = document.getElementById(p + 'DnPct');
+  const barDnEl   = document.getElementById(p + 'BarDn');
+  const dnPriceEl = document.getElementById(p + 'DnPrice');
+  const dnPct2El  = document.getElementById(p + 'DnPct2');
+
+  if (!m || !upPctEl) return;
+
+  const upW = parseFloat(m.up_mid);
+  const dnW = parseFloat(m.down_mid);
+  if (!isFinite(upW) || !isFinite(dnW) || (upW + dnW) <= 0) return;
+
+  // Flash on price change
+  const prev = _prevUpMid[p];
+  if (prev !== null && prev !== upW) {
+    flashCard(p, upW > prev ? 'up' : 'down');
+  }
+  _prevUpMid[p] = upW;
+
+  const upPct = (upW / (upW + dnW)) * 100;
+  const dnPct = 100 - upPct;
+
+  if (upPctEl)   upPctEl.textContent   = upPct.toFixed(1) + '%';
+  if (barUpEl)   barUpEl.style.width   = upPct + '%';
+  if (upPriceEl) upPriceEl.textContent = upW.toFixed(4);
+  if (upPct2El)  upPct2El.textContent = (upW * 100).toFixed(1);
+
+  if (dnPctEl)   dnPctEl.textContent   = dnPct.toFixed(1) + '%';
+  if (barDnEl)   barDnEl.style.width   = dnPct + '%';
+  if (dnPriceEl) dnPriceEl.textContent = dnW.toFixed(4);
+  if (dnPct2El)  dnPct2El.textContent = (dnW * 100).toFixed(1);
+
+  // Window end: compute from current Beijing time (always accurate)
+  const wb = getWindowBounds();
+  const weEl = document.getElementById(p + 'WindowEnd');
+  if (weEl) weEl.textContent = fmtBJ(wb.endBj);
+}
+
+// ── Apply full state from /ws/live ──────────────────────────────────────
+let _globalMarkets = {};
+
+function applyState(d) {
+  if (d.market_duration_sec != null) {
+    const w = Number(d.market_duration_sec);
+    if (Number.isFinite(w) && w >= 60) _marketWindowSec = w;
+  }
+
+  // Strategy running state → update toggle
+  if (d.strategy_running !== undefined) {
+    const running = !!d.strategy_running;
+    _strategyRunning = running;
+    const checkbox = document.getElementById('strategy-checkbox');
+    const statusEl = document.getElementById('strategy-status');
+    if (checkbox && checkbox.checked !== running) checkbox.checked = running;
+    if (statusEl) {
+      statusEl.textContent = running ? '运行中' : '已停止';
+      statusEl.className = 'toggle-status ' + (running ? 'running' : 'stopped');
+    }
+  }
+
+  // Markets → price cards
+  const mkts = d.markets || {};
+  _globalMarkets = mkts;  // store for positions rendering
+  applyPrices('btc', mkts.BTC);
+  applyPrices('eth', mkts.ETH);
+
+  updatePositions(d.open_positions || {});
+
+  // Mode badge
+  const live = d.live_mode;
+  const mbEl = document.getElementById('mode_badge');
+  const mdEl = document.getElementById('mode_detail');
+  if (mbEl) { mbEl.textContent = live ? '实盘' : '干跑'; mbEl.className = 'stat-value ' + (live ? 'red' : 'orange'); }
+  if (mdEl) mdEl.textContent = live ? '真实交易' : '模拟交易';
+}
+
+// ── Positions ────────────────────────────────────────────────────────────
+function updatePositions(positions) {
+  const tbody = document.getElementById('positions_tbody');
+  if (!tbody) return;
+  if (!positions || Object.keys(positions).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-data">无持仓</td></tr>';
+    return;
+  }
+  tbody.innerHTML = Object.entries(positions).map(([asset, p]) => {
+    const we = p.window_end ? fmtBJStr(p.window_end) : '--';
+    const pnlPct = p.unrealized_pnl_pct ?? 0;
+    const pnlUsd = p.unrealized_pnl ?? 0;
+    const sideLabel = p.side === 'UP' ? 'UP' : 'DOWN';
+    const mkt = (_globalMarkets[asset] || {});
+    const curPrice = (p.mid != null && p.mid !== undefined)
+      ? p.mid
+      : (p.side === 'DOWN' ? mkt.down_mid : mkt.up_mid);
+    const curPriceStr = curPrice != null ? Number(curPrice).toFixed(4) : '--';
+    const nextPx = p.next_add_trigger_price != null ? p.next_add_trigger_price : p.next_add_trigger;
+    const nextPct = p.next_add_drawdown_pct;
+    const entryShow = Number(p.vwap ?? p.entry ?? p.entry_price ?? 0).toFixed(4);
+    const tokensStr = (p.tokens != null) ? Number(p.tokens).toFixed(2) : '--';
+    const fillsStr = (p.addons_done != null) ? String(p.addons_done) : '--';
+    const costStr = (p.actual_cost_usdc != null) ? Number(p.actual_cost_usdc).toFixed(2) : '--';
+    return `<tr>
+      <td>${asset}</td>
+      <td><span class="badge ${p.side}">${sideLabel}</span></td>
+      <td>${tokensStr}</td>
+      <td>${entryShow}</td>
+      <td>${curPriceStr}</td>
+      <td>${costStr}</td>
+      <td>${fillsStr}</td>
+      <td>${we}</td>
+      <td class="${pnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%&nbsp;<span style="font-size:11px;opacity:0.7">(${(pnlUsd >= 0 ? '+' : '') + Number(pnlUsd).toFixed(2)})</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Trades ───────────────────────────────────────────────────────────────
+async function loadTrades() {
+  const d = await api('/api/trades?limit=10');
+  if (!d || !d.trades) return;
+  const tbody = document.getElementById('trades_tbody');
+  if (!tbody) return;
+  if (!d.trades.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="no-data">暂无记录</td></tr>';
+    return;
+  }
+  const sideMap = { UP: 'UP', DOWN: 'DOWN' };
+    const reasonMap = {
+    'martingale_tp': '马丁止盈',
+    'martingale_tp_partial': '马丁止盈-部分卖出',
+    'martingale_tp_redeem_fallback': '马丁止盈-部分卖出-链上赎回兜底',
+    'martingale_tp_redeem_zero': '马丁止盈-部分卖出-链上赎回失败（全损）',
+    'late_window_stop_loss': '末段止损',
+    'late_window_stop_loss_partial': '末段止损-部分卖出',
+    'late_window_stop_loss_redeem_fallback': '末段止损-链上赎回兜底',
+    'late_window_stop_loss_redeem_zero': '末段止损-链上赎回失败（全损）',
+    'settle_timeout_proxy': '窗口结算',
+    'settle_timeout_proxy_partial': '窗口结算-部分卖出',
+    'settle_timeout_proxy_redeem_fallback': '窗口结算-链上赎回兜底',
+    'settle_timeout_proxy_redeem_zero': '窗口结算-链上赎回失败（全损）',
+    'settle_exhausted': '结算耗尽',
+    'settle_exhausted_redeem_fallback': '结算耗尽-链上赎回兜底',
+    'settle_exhausted_redeem_zero': '结算耗尽-链上赎回失败（全损）',
+    'invalid_tokens_bought': '异常持仓强制平仓',
+    'invalid_tokens_bought_partial': '异常持仓-部分卖出',
+    'invalid_tokens_bought_redeem_fallback': '异常持仓-链上赎回兜底',
+    'invalid_tokens_bought_redeem_zero': '异常持仓-链上赎回失败（全损）',
+    'giveup': '卖出失败放弃',
+    '小额残差已清': '小额残差已清',
+  };
+  tbody.innerHTML = d.trades.map(t => `<tr>
+    <td>${fmtBJStr(t.opened_at)}</td>
+    <td>${t.asset}</td>
+    <td><span class="badge ${t.side}">${sideMap[t.side] || t.side}</span></td>
+    <td>${Number(t.entry_price).toFixed(4)}</td>
+    <td>${t.vwap != null ? Number(t.vwap).toFixed(4) : '--'}</td>
+    <td>${t.exit_price ? Number(t.exit_price).toFixed(4) : '--'}</td>
+    <td>${t.closed_at ? fmtBJStr(t.closed_at) : '--'}</td>
+    <td class="${(t.pnl_pct || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}">${t.pnl_pct != null ? Number(t.pnl_pct).toFixed(2) + '%' : '--'}</td>
+    <td class="${(t.pnl_usd || 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}">${
+      t.pnl_usd != null && t.pnl_usd !== 0
+        ? Number(t.pnl_usd).toFixed(2)
+        : ((t.pnl_pct != null && t.bet_usdc != null)
+            ? (Number(t.pnl_pct) >= 0 ? '+' : '') + (Number(t.pnl_pct) * Number(t.bet_usdc) / 100).toFixed(2)
+            : '--')
+    }</td>
+    <td>${reasonMap[t.close_reason] || t.close_reason || '--'}</td>
+  </tr>`).join('');
+
+  const totalEl = document.getElementById('total_trades');
+  const wrEl    = document.getElementById('win_rate_text');
+  const pnlEl   = document.getElementById('total_pnl');
+
+  // 总交易数和胜率从 /api/stats 取全量数据，避免分页遗漏
+  api('/api/stats').then(s => {
+    if (s) {
+      if (totalEl) totalEl.textContent = s.total;
+      if (wrEl) wrEl.textContent = ((s.win_rate || 0).toFixed(1)) + '% 胜率';
+    }
+  });
+
+  // total_pnl 直接用前端已知的 pnl_pct × bet_usdc 计算，避免依赖后端 pnl_usd 字段（可能为0）
+  const allPnls = (d.trades || []).map(t => {
+    if (t.pnl_usd != null && t.pnl_usd !== 0) return Number(t.pnl_usd);
+    if (t.pnl_pct != null && t.bet_usdc != null) return Number(t.pnl_pct) * Number(t.bet_usdc) / 100;
+    return null;
+  });
+  const totalPnlUsd = allPnls.filter(v => v !== null).reduce((a, b) => a + b, 0);
+  if (pnlEl) {
+    const pnl = totalPnlUsd;
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+    pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
+  }
+}
+
+// ── WebSocket: single /ws/live + HTTP fallback ───────────────────────────
+let ws         = null;
+let wsOnline   = false;
+let retryDelay = 2000;   // ms, exponential backoff
+let retryTimer = null;
+let pollTimer  = null;
+const MAX_RETRY_MS = 30000;
+
+function setWsStatus() {
+  const dot   = document.getElementById('ws-dot');
+  const label = document.getElementById('ws-label');
+  if (dot)   dot.className   = 'live-dot' + (wsOnline ? '' : ' offline');
+  if (label) label.textContent = wsOnline ? '实时' : '离线 (重连中)';
+}
+
+async function fetchDashboard() {
+  const d = await api('/api/live/dashboard');
+  if (d && !d.error) applyState(d);
+}
+
+function startPoll() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(fetchDashboard, 5000);
+}
+
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function connectWS() {
+  if (ws) {
+    ws.onclose = null;
+    ws.onerror = null;
+    try { ws.close(); } catch (_) {}
+    ws = null;
+  }
+  wsOnline = false;
+  setWsStatus();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/live');
+
+  ws.onopen = () => {
+    wsOnline   = true;
+    retryDelay = 2000;
+    setWsStatus();
+  };
+
+  ws.onmessage = ev => {
+    const d = JSON.parse(ev.data);
+    if (!d._type || d._type !== 'state') return;
+    applyState(d);
+  };
+
+  ws.onclose = () => {
+    wsOnline = false;
+    setWsStatus();
+    startPoll();
+    retryTimer = setTimeout(connectWS, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, MAX_RETRY_MS);
+    console.log('[ws/live] reconnect in', retryDelay / 1000, 's');
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+// ── Init ────────────────────────────────────────────────────────────────
+checkAuth();
+loadStrategyStatus();
+loadTrades();
+connectWS();
+setInterval(updateBJClock, 1000);
+setInterval(loadTrades, 10000);
+updateBJClock();
+</script>
+</body>
+</html>

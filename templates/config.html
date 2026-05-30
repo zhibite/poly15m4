@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置 - Polymarket</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a14; color: #e0e0e0; }
+  nav { background: #12122a; border-bottom: 1px solid #1e1e3a; padding: 0 24px; display: flex; align-items: center; gap: 8px; height: 56px; }
+  nav a { color: #a0a0b0; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
+  nav a:hover, nav a.active { background: #1e1e3a; color: #a78bfa; }
+  nav .brand { font-weight: 700; font-size: 16px; color: #7c3aed; margin-right: 16px; }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .nav-user { display: flex; align-items: center; gap: 8px; }
+  .nav-user-info { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 6px; }
+  .nav-user-info .user-icon { font-size: 14px; }
+  .nav-user-info .username { color: #a0a0b0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .logout-btn { font-size: 12px; color: #6b7280; background: none; border: 1px solid #2a2a4a; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+  .logout-btn:hover { color: #ef4444; border-color: #7f1d1d; background: #1e0e0e; }
+  .container { max-width: 900px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 24px; }
+  .card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 24px; margin-bottom: 20px; }
+  .card h2 { font-size: 15px; color: #a78bfa; margin-bottom: 16px; border-bottom: 1px solid #1e1e3a; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .row3 { grid-template-columns: 1fr 1fr 1fr; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 12px; color: #9ca3af; }
+  input, select { padding: 8px 12px; background: #0a0a14; border: 1px solid #2a2a4a; border-radius: 6px; color: #e0e0e0; font-size: 14px; outline: none; font-family: inherit; }
+  input:focus, select:focus { border-color: #7c3aed; }
+  input.error { border-color: #ef4444; }
+  input.mono { font-family: 'Courier New', monospace; letter-spacing: 0.05em; }
+  .actions { display: flex; gap: 12px; margin-top: 4px; }
+  button { padding: 10px 24px; background: #7c3aed; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  button:hover { background: #6d28d9; }
+  button.secondary { background: #1e1e3a; border: 1px solid #2a2a4a; }
+  button.secondary:hover { background: #2a2a4a; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg { margin-top: 12px; font-size: 13px; padding: 10px; border-radius: 6px; display: none; }
+  .msg.ok { background: #064e3b; color: #34d399; display: block; }
+  .msg.err { background: #450a0a; color: #f87171; display: block; }
+  .hint { font-size: 11px; color: #6b7280; }
+  .toggle { display: flex; align-items: center; gap: 12px; }
+  .toggle-switch { position: relative; width: 48px; height: 26px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; cursor: pointer; inset: 0; background: #2a2a4a; border-radius: 26px; transition: .3s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 20px; height: 20px; left: 3px; bottom: 3px; background: #6b7280; border-radius: 50%; transition: .3s; }
+  .toggle-switch input:checked + .toggle-slider { background: #7c3aed; }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(22px); background: white; }
+  .toggle-label .name { font-size: 14px; font-weight: 600; }
+  .toggle-label .desc { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .badge-live { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; background: #450a0a; color: #f87171; }
+  .badge-dry { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; background: #1e3a5f; color: #60a5fa; }
+  .confirm-live-btn { margin-left: 12px; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 700; cursor: pointer; background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; transition: all 0.2s; }
+  .confirm-live-btn:hover { background: #7f1d1d; color: #fca5a5; }
+  .confirm-live-btn.confirmed { background: #064e3b; color: #34d399; border-color: #065f46; cursor: default; }
+  .confirm-live-hint { font-size: 11px; color: #fb923c; margin-left: 8px; }
+  .tp-preview { background: #0d0d24; border: 1px solid #2a2a4a; border-radius: 8px; padding: 14px 18px; margin-bottom: 16px; }
+  .tp-formula { font-size: 12px; color: #9ca3af; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .tp-formula .tp-label { color: #a78bfa; font-weight: 600; }
+  .tp-formula code { font-family: 'Courier New', monospace; color: #e0e0e0; }
+  .tp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tp-table th { text-align: left; color: #6b7280; font-weight: 500; padding: 4px 8px 8px; border-bottom: 1px solid #1e1e3a; }
+  .tp-table td { padding: 5px 8px; color: #e0e0e0; }
+  .tp-table td:first-child { color: #9ca3af; }
+  .tp-table td.highlight { color: #34d399; font-weight: 600; }
+  .tp-table td.warning { color: #fb923c; font-weight: 600; }
+  .wallet-address { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #0a0a14; border: 1px solid #2a2a4a; border-radius: 8px; margin-bottom: 16px; }
+  .wallet-address .addr { font-family: 'Courier New', monospace; font-size: 13px; color: #a78bfa; word-break: break-all; }
+  .balance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .balance-item { background: #0a0a14; border: 1px solid #2a2a4a; border-radius: 8px; padding: 14px; }
+  .balance-item .bal-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .balance-item .bal-value { font-size: 18px; font-weight: 700; }
+  .balance-item .bal-value.green { color: #10b981; }
+  .balance-item .bal-value.red { color: #ef4444; }
+  .loading { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6b7280; }
+  .spinner { width: 16px; height: 16px; border: 2px solid #2a2a4a; border-top-color: #7c3aed; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 768px) {
+    nav { padding: 0 12px; gap: 4px; }
+    nav a { padding: 6px 10px; font-size: 13px; }
+    .container { padding: 16px; }
+    .card { padding: 16px; margin-bottom: 16px; }
+    .row { grid-template-columns: 1fr; }
+    .row3 { grid-template-columns: 1fr; }
+    .actions button { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">Polymarket</span>
+  <a href="/">控制台</a>
+  <a href="/trades">交易记录</a>
+  <a href="/indicators">指标面板</a>
+  <a href="/config" class="active">配置</a>
+  <div class="nav-right">
+    <div class="nav-user">
+      <div class="nav-user-info" id="nav-user-info" style="display:none">
+        <span class="user-icon">&#128100;</span>
+        <span class="username" id="nav-username"></span>
+      </div>
+      <button class="logout-btn" id="nav-logout-btn" style="display:none" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+</nav>
+<div class="container">
+  <h1>策略配置</h1>
+
+  <!-- Wallet -->
+  <div class="card">
+    <h2>钱包</h2>
+    <div class="wallet-address">
+      <svg width="20" height="20" fill="none" stroke="#10b981" stroke-width="2" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <div>
+        <div class="addr" id="connected-addr">--</div>
+        <div style="font-size:11px;color:#6b7280;margin-top:2px">签名地址</div>
+      </div>
+    </div>
+    <div class="balance-grid" id="balance-grid">
+      <div class="balance-item">
+        <div class="bal-label">CLOB pUSD 余额</div>
+        <div class="bal-value" id="bal-clob">--</div>
+      </div>
+      <div class="balance-item">
+        <div class="bal-label">Allowance</div>
+        <div class="bal-value" id="bal-allow">--</div>
+      </div>
+    </div>
+    <div class="loading" id="balance-loading" style="display:none"><div class="spinner"></div>查询中...</div>
+    <div class="actions">
+      <button class="secondary" onclick="syncBalance()" id="sync-btn">同步余额缓存</button>
+    </div>
+    <div class="msg" id="wallet-msg"></div>
+  </div>
+
+  <!-- Run Mode -->
+  <div class="card">
+    <h2>运行模式</h2>
+    <div class="row">
+      <div class="toggle">
+        <label class="toggle-switch">
+          <input type="checkbox" id="live_mode" onchange="onModeToggle(this)">
+          <span class="toggle-slider"></span>
+        </label>
+        <div class="toggle-label">
+          <div class="name" id="mode-name">干跑模式</div>
+          <div class="desc" id="mode-desc">仅模拟撮合与记账，不向 CLOB 提交真实委托</div>
+        </div>
+        <span class="badge-dry" id="mode-badge">干跑</span>
+        <button class="confirm-live-btn" id="confirm-live-btn" style="display:none" onclick="confirmLive()">确认实盘</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>滑点容忍 (%)</label>
+        <input type="number" id="live_slippage_pct" step="0.1" min="0.1" max="10">
+        <span class="hint">向 CLOB 下单时的价格容忍</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Martingale Parameters -->
+  <div class="card">
+    <h2>马丁参数</h2>
+    <div class="row row3">
+      <div class="field">
+        <label>市场周期 (slug)</label>
+        <input type="text" id="market_interval_slug" maxlength="24" class="mono" placeholder="15m">
+        <span class="hint">Gamma slug，如 15m</span>
+      </div>
+      <div class="field">
+        <label>窗口时长 (秒)</label>
+        <input type="number" id="market_duration_sec" step="60" min="120" max="86400">
+        <span class="hint">须与 Gamma 对齐（默认 900s=15分钟）</span>
+      </div>
+      <div class="field">
+        <label>首单金额 (USDC)</label>
+        <input type="number" id="martingale_base_usdc" step="0.1" min="1.0" max="10000" value="2">
+        <span class="hint">Polymarket 最低 1 USDC，默认 2U</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>马丁倍数</label>
+        <input type="number" id="martingale_multiplier" step="0.01" min="1.01" max="50">
+        <span class="hint">补仓金额 = 首单 × 倍数^(补仓次数)</span>
+      </div>
+      <div class="field">
+        <label>最大补仓次数</label>
+        <input type="number" id="martingale_max_adds" step="1" min="0" max="24">
+        <span class="hint">最多 N 次加仓（含首单共 N+1 笔成交）</span>
+      </div>
+      <div class="field">
+        <label>补仓触发跌幅（%，逗号分隔）</label>
+        <input type="text" id="martingale_addon_drawdowns_pct" class="mono" placeholder="20,50">
+        <span class="hint">如"20,50"：第1次-20%，第2次-50%</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>补仓截止 (秒)</label>
+        <input type="number" id="addon_late_cutoff_elapsed_sec" step="30" min="0" max="900">
+        <span class="hint">此时长之后不再补仓（默认 540s=前9分钟）</span>
+      </div>
+      <div class="field">
+        <label>现货不利偏离 (%)</label>
+        <input type="number" id="addon_spot_deviation_pct" step="0.01" min="0.01" max="10">
+        <span class="hint">加仓时 BTC/ETH 现货偏离阈值，超限跳过加仓</span>
+      </div>
+      <div class="field">
+        <label>最低出场价</label>
+        <input type="number" id="min_exit_price" step="0.001" min="0" max="0.5">
+        <span class="hint">低于此价触发链上赎回兜底</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Assets -->
+  <div class="card">
+    <h2>交易标的</h2>
+    <div class="row">
+      <div class="field">
+        <label class="toggle-label" style="flex-direction:row;align-items:center;gap:10px;cursor:pointer">
+          <input type="checkbox" id="asset_btc_enabled">
+          <span>交易 BTC</span>
+        </label>
+      </div>
+      <div class="field">
+        <label class="toggle-label" style="flex-direction:row;align-items:center;gap:10px;cursor:pointer">
+          <input type="checkbox" id="asset_eth_enabled">
+          <span>交易 ETH</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Signal Entry -->
+  <div class="card">
+    <h2>信号驱动入场</h2>
+    <div class="row row3">
+      <div class="field">
+        <label>基准仓位 (USDC)</label>
+        <input type="number" id="entry_base_usdc" step="0.5" min="1.0" max="100" value="4">
+        <span class="hint">5/6 → 1.5×，6/6 → 2×，最多 100U，默认 4U</span>
+      </div>
+      <div class="field">
+        <label>Core 6 全仓门槛</label>
+        <input type="number" id="core_agree_threshold" step="1" min="2" max="6">
+        <span class="hint">≥ 此值时全仓（4=1×，5=1.5×，6=2×），默认 4</span>
+      </div>
+      <div class="field">
+        <label>Core 6 入场门槛</label>
+        <input type="number" id="core_agree_standard" step="1" min="2" max="6">
+        <span class="hint">≥ 此值时可入场（3=0.5×），默认 3</span>
+      </div>
+      <div class="field">
+        <label>入场起始 (秒)</label>
+        <input type="number" id="entry_early_start_elapsed_sec" step="30" min="0" max="900">
+        <span class="hint">窗口开启后此时长后允许入场（0=窗口开启即入场），默认 0s</span>
+      </div>
+      <div class="field">
+        <label>入场截止 (秒)</label>
+        <input type="number" id="entry_late_cutoff_elapsed_sec" step="30" min="60" max="900">
+        <span class="hint">超过此时长后禁止开单（默认 540s=前9分钟）</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>入场价格下限</label>
+        <input type="number" id="entry_price_min" step="0.01" min="0.01" max="0.99">
+        <span class="hint">UP/DOWN 价格低于此值时跳过，默认 0.20</span>
+      </div>
+      <div class="field">
+        <label>入场价格上限</label>
+        <input type="number" id="entry_price_max" step="0.01" min="0.01" max="0.99">
+        <span class="hint">UP/DOWN 价格高于此值时跳过，默认 0.60</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settlement & Risk -->
+  <div class="card">
+    <h2>结算与风控</h2>
+    <div class="row row3">
+      <div class="field">
+        <label>SETTLE_GRACE_SEC</label>
+        <input type="number" id="settle_grace_sec" step="10" min="10" max="3600">
+        <span class="hint">窗口结束后等待此秒数再查结算（默认 120s）</span>
+      </div>
+      <div class="field">
+        <label>MAX_SETTLE_WAIT_SEC</label>
+        <input type="number" id="max_settle_wait_sec" step="60" min="60" max="7200">
+        <span class="hint">最大等待结算时间（默认 900s）</span>
+      </div>
+      <div class="field">
+        <label>SELL_MAX_RETRY</label>
+        <input type="number" id="sell_max_retry_count" step="1" min="1" max="10">
+        <span class="hint">卖出失败重试次数（默认 3）</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>首单止盈下限 (%)</label>
+        <input type="number" id="signal_tp_base_pct" step="1" min="1" max="50">
+        <span class="hint">入场价高时的止盈（默认 10%），TP = 下限 + 跨度</span>
+      </div>
+      <div class="field">
+        <label>首单止盈跨度 (%)</label>
+        <input type="number" id="signal_tp_range_pct" step="1" min="5" max="50">
+        <span class="hint">入场价低时的止盈额外奖励（默认 30%），TP = 下限 + 跨度</span>
+      </div>
+      <div class="field">
+        <label>补仓收紧幅度 (%)</label>
+        <input type="number" id="signal_tp_tighten_per_add_pct" step="0.5" min="0" max="50">
+        <span class="hint">每次补仓后止盈收紧（默认 5%）</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>止盈公式入场低价</label>
+        <input type="number" id="signal_tp_entry_price_min" step="0.01" min="0.05" max="0.50">
+        <span class="hint">止盈公式中的低价边界（默认 0.20）</span>
+      </div>
+      <div class="field">
+        <label>止盈公式入场高价</label>
+        <input type="number" id="signal_tp_entry_price_max" step="0.01" min="0.40" max="0.70">
+        <span class="hint">止盈公式中的高价边界（默认 0.60）</span>
+      </div>
+      <div class="field">
+        <label>固定止损 (%)</label>
+        <input type="number" id="signal_fixed_stop_loss_pct" step="0.5" min="-99" max="0">
+        <span class="hint">初始建仓止损阈值（默认 -10%），补仓后上移</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>止损收紧幅度 (%)</label>
+        <input type="number" id="signal_sl_tighten_per_add_pct" step="0.5" min="0" max="20">
+        <span class="hint">每次补仓止损收紧幅度（默认 2%）</span>
+      </div>
+    </div>
+
+    <!-- 止盈公式预览 -->
+    <div class="tp-preview" id="tp-preview">
+      <div class="tp-formula">
+        <span class="tp-label">止盈公式：</span>
+        <code>TP = tp_base + tp_range × (entry_price_max − entry) / (entry_price_max − entry_price_min)</code>
+      </div>
+      <div class="tp-formula" style="margin-top:6px">
+        <span class="tp-label" style="color:#a78bfa">补仓收紧：</span>
+        <code>TP_n = TP − tighten × n</code>
+      </div>
+      <table class="tp-table">
+        <thead>
+          <tr>
+            <th>入场价</th>
+            <th>首单 TP</th>
+            <th>补1次 TP</th>
+            <th>补2次 TP</th>
+          </tr>
+        </thead>
+        <tbody id="tp-preview-body"></tbody>
+      </table>
+    </div>
+
+    <!-- 止损公式预览 -->
+    <div class="tp-preview" id="sl-preview">
+      <div class="tp-formula">
+        <span class="tp-label" style="color:#f87171">止损公式：</span>
+        <code>SL = fixed_stop_loss + tighten × n</code>
+      </div>
+      <div class="tp-formula" style="margin-top:6px">
+        <span class="tp-label" style="color:#6b7280">说明：</span>
+        <code>固定止损默认 -10%，每次补仓后向 0 收紧（-10%→-8%→-6%...）</code>
+      </div>
+      <table class="tp-table">
+        <thead>
+          <tr>
+            <th>补仓次数</th>
+            <th>止损阈值</th>
+            <th>触发条件</th>
+          </tr>
+        </thead>
+        <tbody id="sl-preview-body"></tbody>
+      </table>
+    </div>
+
+    <div class="row row3">
+      <div class="field">
+        <label>BTC 滑点 (%)</label>
+        <input type="number" id="btc_slippage_pct" step="0.1" min="0.1" max="10">
+        <span class="hint">BTC 订单滑点容忍（默认 1.0%）</span>
+      </div>
+      <div class="field">
+        <label>ETH 滑点 (%)</label>
+        <input type="number" id="eth_slippage_pct" step="0.1" min="0.1" max="10">
+        <span class="hint">ETH 订单滑点容忍（默认 2.0%）</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field" style="max-width:320px">
+        <label>手续费 (bps)</label>
+        <input type="number" id="default_fee_bps" step="1" min="1" max="500">
+        <span class="hint">订单手续费基准（默认 30 bps），覆盖自动计算值</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button onclick="saveConfig()">保存配置</button>
+  </div>
+  <div class="msg" id="cfg-msg"></div>
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('pm_token') || '';
+
+async function api(path, opts={}) {
+  const r = await fetch(API + path, {
+    ...opts,
+    signal: AbortSignal.timeout(15000),
+    headers: { ...opts.headers, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  if (r.status === 401) { window.location.href = '/login'; return null; }
+  return r.json();
+}
+
+async function checkAuth() {
+  const d = await api('/api/auth/me');
+  const userInfo = document.getElementById('nav-user-info');
+  const logoutBtn = document.getElementById('nav-logout-btn');
+  if (d) {
+    if (userInfo) userInfo.style.display = 'flex';
+    const nameEl = document.getElementById('nav-username');
+    if (nameEl) nameEl.textContent = (d.username || '用户') + (d.is_admin ? ' (管理员)' : '');
+    if (logoutBtn) logoutBtn.style.display = 'block';
+  } else {
+    if (userInfo) userInfo.style.display = 'none';
+    if (logoutBtn) logoutBtn.style.display = 'none';
+  }
+}
+
+async function doLogout() {
+  if (!confirm('确定要退出登录吗？')) return;
+  await fetch(API + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  localStorage.removeItem('pm_token');
+  window.location.href = '/login';
+}
+
+function showMsg(elId, text, ok) {
+  const el = document.getElementById(elId);
+  el.textContent = text;
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+  el.style.display = 'block';
+  if (ok) setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+async function syncBalance() {
+  const btn = document.getElementById('sync-btn');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '同步中...';
+  try {
+    const d = await api('/api/wallet/sync-balance', { method: 'POST' });
+    if (d && d.ok) { showMsg('wallet-msg', '余额已同步', true); setTimeout(refreshBalance, 500); }
+    else { showMsg('wallet-msg', d?.error || '同步失败', false); }
+  } catch { showMsg('wallet-msg', '同步失败', false); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+}
+
+async function refreshBalance() {
+  const loading = document.getElementById('balance-loading');
+  loading.style.display = 'flex';
+  try {
+    const d = await api('/api/wallet/balance');
+    if (!d) throw new Error();
+    document.getElementById('bal-clob').textContent = d.balance_usdc != null ? d.balance_usdc.toFixed(6) + ' pUSD' : '--';
+    document.getElementById('bal-allow').textContent = d.allowance_usdc != null ? d.allowance_usdc.toFixed(6) + ' pUSD' : '--';
+  } catch { showMsg('wallet-msg', '余额查询失败', false); }
+  finally { loading.style.display = 'none'; }
+}
+
+async function checkWalletStatus() {
+  const d = await api('/api/wallet/status');
+  const addr = (d?.funder_address || d?.signer_address || '未配置').trim();
+  document.getElementById('connected-addr').textContent = addr;
+  refreshBalance();
+}
+
+function onModeToggle(checkbox) {
+  const isLive = checkbox.checked;
+  document.getElementById('mode-name').textContent = isLive ? '实盘模式' : '干跑模式';
+  document.getElementById('mode-desc').textContent = isLive
+    ? '真实交易，资金在链上。'
+    : '仅模拟撮合与记账，不向 CLOB 提交真实委托';
+  document.getElementById('mode-badge').textContent = isLive ? '实盘' : '干跑';
+  document.getElementById('mode-badge').className = isLive ? 'badge-live' : 'badge-dry';
+}
+
+async function confirmLive() {
+  const btn = document.getElementById('confirm-live-btn');
+  if (btn.classList.contains('confirmed')) return;
+  btn.textContent = '确认中...';
+  btn.disabled = true;
+  const r = await api('/api/live/confirm', { method: 'POST' });
+  btn.disabled = false;
+  if (r && r.ok) {
+    btn.textContent = '已确认 ✓';
+    btn.classList.add('confirmed');
+    btn.disabled = true;
+    showMsg('cfg-msg', '实盘已确认，请在 5 分钟内保存配置', true);
+  } else {
+    btn.textContent = '确认实盘';
+    showMsg('cfg-msg', '确认失败：' + (r && r.detail ? r.detail : '未知错误'), false);
+  }
+}
+
+function validateConfig(body) {
+  if (!body.asset_btc_enabled && !body.asset_eth_enabled) return '至少启用 BTC 或 ETH 之一';
+  if (body.settle_grace_sec >= body.max_settle_wait_sec) return 'SETTLE_GRACE_SEC 必须小于 MAX_SETTLE_WAIT_SEC';
+  return null;
+}
+
+async function loadConfig() {
+  const d = await api('/api/config');
+  if (!d) return;
+  const boolFields = new Set(['live_mode', 'asset_btc_enabled', 'asset_eth_enabled', 'signal_trailing_stop_enabled']);
+  const numFields = [
+    'market_interval_slug',
+    'market_duration_sec',
+    'martingale_base_usdc', 'martingale_multiplier', 'martingale_max_adds',
+    'martingale_addon_drawdowns_pct',
+    'addon_late_cutoff_elapsed_sec', 'addon_spot_deviation_pct',
+    'min_exit_price',
+    'entry_base_usdc',
+    'entry_early_start_elapsed_sec',
+    'entry_late_cutoff_elapsed_sec',
+    'core_agree_threshold', 'core_agree_standard',
+    'entry_price_min', 'entry_price_max',
+    'live_slippage_pct',
+    'btc_slippage_pct', 'eth_slippage_pct',
+    'settle_grace_sec', 'max_settle_wait_sec',
+    'sell_max_retry_count',
+    'default_fee_bps',
+    'signal_tp_base_pct', 'signal_tp_range_pct',
+    'signal_tp_entry_price_min', 'signal_tp_entry_price_max',
+    'signal_tp_tighten_per_add_pct',
+    'signal_fixed_stop_loss_pct', 'signal_sl_tighten_per_add_pct',
+  ];
+  for (const [k, v] of Object.entries(d)) {
+    const el = document.getElementById(k);
+    if (!el) continue;
+    if (boolFields.has(k)) {
+      el.checked = !!v;
+      if (k === 'live_mode') onModeToggle(el);
+    } else {
+      el.value = v;
+    }
+  }
+
+  // Load confirmation state and update UI
+  const status = await api('/api/live/status');
+  if (status) {
+    const btn = document.getElementById('confirm-live-btn');
+    if (status.live_mode_confirmed) {
+      btn.textContent = '已确认 ✓';
+      btn.classList.add('confirmed');
+      btn.disabled = true;
+    } else {
+      btn.style.display = 'inline-block';
+      btn.textContent = '确认实盘';
+      btn.classList.remove('confirmed');
+      btn.disabled = false;
+    }
+  }
+}
+
+async function saveConfig() {
+  document.querySelectorAll('input.error').forEach(el => el.classList.remove('error'));
+  const fields = [
+    'market_interval_slug',
+    'market_duration_sec',
+    'martingale_base_usdc', 'martingale_multiplier', 'martingale_max_adds',
+    'entry_base_usdc',
+    'entry_early_start_elapsed_sec',
+    'addon_late_cutoff_elapsed_sec', 'addon_spot_deviation_pct',
+    'min_exit_price',
+    'entry_late_cutoff_elapsed_sec',
+    'core_agree_threshold', 'core_agree_standard',
+    'entry_price_min', 'entry_price_max',
+    'live_slippage_pct',
+    'btc_slippage_pct', 'eth_slippage_pct',
+    'settle_grace_sec', 'max_settle_wait_sec',
+    'sell_max_retry_count',
+    'default_fee_bps',
+    'signal_tp_base_pct', 'signal_tp_range_pct',
+    'signal_tp_entry_price_min', 'signal_tp_entry_price_max',
+    'signal_tp_tighten_per_add_pct',
+    'signal_fixed_stop_loss_pct', 'signal_sl_tighten_per_add_pct',
+  ];
+  const body = {};
+  for (const k of fields) {
+    const el = document.getElementById(k);
+    if (!el) { console.warn('missing field:', k); continue; }
+    if (el.value === '' || el.value === null) continue; // 空值不提交，后端使用默认值
+    if (k === 'market_interval_slug') { body[k] = String(el.value).trim().toLowerCase().replace('/', ''); continue; }
+    if (k === 'martingale_max_adds') { if (el.value !== '') body[k] = parseInt(el.value, 10); continue; }
+    body[k] = parseFloat(el.value);
+  }
+  body.martingale_addon_drawdowns_pct = String(document.getElementById('martingale_addon_drawdowns_pct').value || '').trim();
+  body.live_mode = document.getElementById('live_mode').checked;
+  body.asset_btc_enabled = document.getElementById('asset_btc_enabled').checked;
+  body.asset_eth_enabled = document.getElementById('asset_eth_enabled').checked;
+
+  const err = validateConfig(body);
+  if (err) { showMsg('cfg-msg', err, false); return; }
+
+  if (body.live_mode) {
+    const wstatus = await api('/api/wallet/status');
+    if (!wstatus || (!wstatus.wallet_connected)) { showMsg('cfg-msg', '开启实盘模式前请先连接钱包', false); return; }
+    if (!confirm('确定开启实盘模式？真实资金将被使用。')) return;
+  }
+
+  const r = await fetch(API + '/api/config', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let d = {};
+  try { d = await r.json(); } catch { d = {}; }
+  if (r.ok) {
+    showMsg('cfg-msg', '配置已保存并立即生效', true);
+    const status = await api('/api/live/status');
+    if (status) {
+      const btn = document.getElementById('confirm-live-btn');
+      if (btn) {
+        if (!body.live_mode) {
+          btn.style.display = 'none';
+          btn.classList.remove('confirmed');
+          btn.textContent = '确认实盘';
+          btn.disabled = false;
+        }
+      }
+    }
+  } else {
+    if (r.status === 403 && body.live_mode) {
+      showMsg('cfg-msg', '请先点击「确认实盘」按钮，再保存配置', false);
+    } else {
+      showMsg('cfg-msg', d.detail || '保存失败', false);
+    }
+  }
+  updateAllPreviews();
+  bindTpPreview();
+  updateAllPreviews();
+  bindTpPreview();
+}
+
+// ── 止盈公式预览 ──────────────────────────────────────────────────────────────
+const _el = id => document.getElementById(id);
+function _v(id) {
+  const el = _el(id);
+  return el && !isNaN(el.value) ? parseFloat(el.value) : 0;
+}
+
+function updateTpPreview() {
+  const tpBase = _v('signal_tp_base_pct');
+  const tpRange = _v('signal_tp_range_pct');
+  const tpEmin = _v('signal_tp_entry_price_min');
+  const tpEmax = _v('signal_tp_entry_price_max');
+  const tighten = _v('signal_tp_tighten_per_add_pct');
+
+  const priceRange = tpEmax - tpEmin;
+  const tbody = _el('tp-preview-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  if (priceRange <= 1e-9) return;
+
+  const step = 0.05;
+  const raw = [];
+  for (let p = tpEmin; p <= tpEmax + 1e-9; p += step) raw.push(parseFloat(p.toFixed(2)));
+  if (raw[raw.length - 1] < tpEmax - 1e-9) raw.push(tpEmax);
+  const levels = [...new Set(raw)].sort((a, b) => a - b);
+
+  levels.forEach(entry => {
+    const scale = (tpEmax - entry) / priceRange;
+    const firstTP = Math.max(0, tpBase + tpRange * scale);
+    const tp1 = Math.max(0, firstTP - tighten);
+    const tp2 = Math.max(0, firstTP - tighten * 2);
+    const cls = v => v > 30 ? 'highlight' : v < 15 ? 'warning' : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${entry.toFixed(2)}</td>` +
+      `<td class="${cls(firstTP)}">${firstTP.toFixed(1)}%</td>` +
+      `<td class="${cls(tp1)}">${tp1.toFixed(1)}%</td>` +
+      `<td class="${cls(tp2)}">${tp2.toFixed(1)}%</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function updateSlPreview() {
+  const slFixed = _v('signal_fixed_stop_loss_pct');
+  const slTighten = _v('signal_sl_tighten_per_add_pct');
+  const maxAdds = Math.round(_v('martingale_max_adds'));
+  const tbody = _el('sl-preview-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  const rows = Math.max(0, maxAdds + 1);
+  for (let n = 0; n <= maxAdds; n++) {
+    const sl = slFixed + slTighten * n;
+    const label = n === 0 ? '首单' : `补${n}次`;
+    const cls = sl >= 0 ? 'warning' : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${label}</td>` +
+      `<td class="${cls}">${sl.toFixed(1)}%</td>` +
+      `<td style="color:#6b7280">累计跌幅 &le; ${Math.abs(sl).toFixed(1)}%</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function updateAllPreviews() {
+  updateTpPreview();
+  updateSlPreview();
+}
+
+function bindTpPreview() {
+  ['signal_tp_base_pct', 'signal_tp_range_pct',
+   'signal_tp_entry_price_min', 'signal_tp_entry_price_max',
+   'signal_tp_tighten_per_add_pct',
+   'signal_fixed_stop_loss_pct', 'signal_sl_tighten_per_add_pct',
+   'martingale_max_adds'].forEach(id => {
+    const el = _el(id);
+    if (el) el.addEventListener('input', updateAllPreviews);
+  });
+}
+
+checkAuth();
+loadConfig();
+checkWalletStatus();
+bindTpPreview();
+updateAllPreviews();
+</script>
+</body>
+</html>

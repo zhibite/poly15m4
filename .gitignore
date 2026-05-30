@@ -1,0 +1,13 @@
+polymarket/data/.env
+polymarket/data/
+*.db
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.env
+.env.docker
+*.log
+.git_commit_msg.txt
+data/

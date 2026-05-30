@@ -1,0 +1,1788 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>指标面板 - Polymarket</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a14; color: #e0e0e0; }
+
+  /* ── Nav ── */
+  nav { background: #12122a; border-bottom: 1px solid #1e1e3a; padding: 0 24px; display: flex; align-items: center; gap: 8px; height: 56px; }
+  nav a { color: #a0a0b0; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
+  nav a:hover, nav a.active { background: #1e1e3a; color: #a78bfa; }
+  nav .brand { font-weight: 700; font-size: 16px; color: #7c3aed; margin-right: 16px; }
+  nav .nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .nav-status { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; animation: pulse 2s infinite; }
+  .live-dot.offline { background: #6b7280; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+
+  /* ── Header row ── */
+  .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+  .page-title { font-size: 22px; font-weight: 700; color: #d1d5db; display: flex; align-items: center; gap: 10px; }
+  .page-title .icon { font-size: 24px; }
+  .asset-selector { display: flex; gap: 8px; }
+  .asset-btn { padding: 6px 16px; border-radius: 6px; border: 1px solid #1e1e3a; background: #12122a; color: #a0a0b0; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  .asset-btn:hover { border-color: #7c3aed; color: #a78bfa; }
+  .asset-btn.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+
+  /* ── Sentiment consensus bar ── */
+  .spot-strip { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+  .spot-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 14px 18px; display: flex; align-items: center; gap: 14px; }
+  .spot-icon { font-size: 24px; }
+  .spot-info { flex: 1; }
+  .spot-label { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
+  .spot-value { font-size: 18px; font-weight: 700; }
+  .spot-sub { font-size: 10px; color: #4b5563; margin-top: 2px; }
+
+  .sentiment-bar { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
+  .sentiment-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .sentiment-title { font-size: 13px; font-weight: 600; color: #a0a0b0; }
+  .sentiment-count { font-size: 12px; color: #6b7280; }
+  .sentiment-count span { font-weight: 700; }
+  .sentiment-count .up-count { color: #34d399; }
+  .sentiment-count .down-count { color: #f87171; }
+  .sentiment-track { height: 8px; background: #1e1e3a; border-radius: 4px; overflow: hidden; display: flex; }
+  .sb-up { background: linear-gradient(90deg, #059669, #10b981); height: 100%; transition: width 0.6s ease; border-radius: 4px 0 0 4px; }
+  .sb-down { background: linear-gradient(90deg, #dc2626, #ef4444); height: 100%; transition: width 0.6s ease; border-radius: 0 4px 4px 0; margin-left: -1px; }
+  .sentiment-labels { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: #6b7280; }
+  .sl-up { color: #34d399; }
+  .sl-down { color: #f87171; }
+
+  /* ── Section titles ── */
+  .section-title { font-size: 15px; font-weight: 700; color: #d1d5db; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .section-title::before { content: ''; display: inline-block; width: 3px; height: 18px; background: #7c3aed; border-radius: 2px; }
+  .section-gap { margin-bottom: 32px; }
+
+  /* ── Core 6 Grid ── */
+  .core-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 32px; }
+  /* ── Advanced 5 Grid ── */
+  .adv-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 32px; }
+
+  /* ── Indicator Card ── */
+  .ind-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.3s; }
+  .ind-card:hover { border-color: #2e2e5a; }
+  .ind-card.bullish { border-left: 3px solid #10b981; }
+  .ind-card.bearish { border-left: 3px solid #ef4444; }
+  .ind-card.neutral { border-left: 3px solid #6b7280; }
+
+  .ind-header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .ind-title-wrap { display: flex; flex-direction: column; gap: 2px; }
+  .ind-name { font-size: 14px; font-weight: 700; color: #d1d5db; }
+  .ind-sub { font-size: 11px; color: #6b7280; }
+  .ind-badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .ind-badge.bull { background: #064e3b; color: #34d399; }
+  .ind-badge.bear { background: #450a0a; color: #f87171; }
+  .ind-badge.flat { background: #1e1e3a; color: #9ca3af; }
+  .ind-badge.unk { background: #1e1e3a; color: #6b7280; }
+
+  .chart-wrap { position: relative; height: 120px; }
+  .chart-wrap canvas { width: 100% !important; height: 100% !important; }
+
+  /* ── RSI specific ── */
+  .rsi-row { display: flex; gap: 12px; }
+  .rsi-gauge-wrap { width: 120px; flex-shrink: 0; }
+  .rsi-gauge-wrap canvas { width: 120px !important; height: 80px !important; }
+  .rsi-info { flex: 1; display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+  .rsi-signal { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .rsi-signal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .rsi-signal-dot.overbought { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+  .rsi-signal-dot.oversold { background: #10b981; box-shadow: 0 0 4px #10b981; }
+  .rsi-signal-dot.neutral { background: #9ca3af; }
+  .rsi-signal-text { color: #9ca3af; }
+  .rsi-signal-text strong { font-weight: 700; }
+  .rsi-signal-text strong.overb { color: #f87171; }
+  .rsi-signal-text strong.overs { color: #34d399; }
+
+  /* ── Value readouts ── */
+  .ind-values { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .iv-item { background: #0a0a14; border: 1px solid #1e1e3a; border-radius: 6px; padding: 8px 10px; }
+  .iv-label { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
+  .iv-value { font-size: 14px; font-weight: 700; }
+  .iv-value.up { color: #34d399; }
+  .iv-value.dn { color: #f87171; }
+  .iv-value.ne { color: #9ca3af; }
+  .iv-value.pu { color: #a78bfa; }
+
+  /* ── MACD histogram ── */
+  .macd-bars { display: flex; align-items: flex-end; gap: 2px; height: 60px; padding: 4px 0; }
+  .macd-bar { flex: 1; border-radius: 2px 2px 0 0; min-width: 4px; transition: height 0.3s ease; }
+  .macd-bar.pos { background: linear-gradient(180deg, #10b981 0%, #059669 100%); }
+  .macd-bar.neg { background: linear-gradient(0deg, #ef4444 0%, #dc2626 100%); }
+  .macd-bar.zero { background: #1e1e3a; }
+  .macd-legend { display: flex; gap: 16px; font-size: 11px; color: #6b7280; margin-top: 4px; }
+  .macd-legend-item { display: flex; align-items: center; gap: 4px; }
+  .macd-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+  .macd-legend-dot.pos { background: #10b981; }
+  .macd-legend-dot.neg { background: #ef4444; }
+  .macd-legend-dot.sig { background: #a78bfa; }
+
+  /* ── Funding rate card ── */
+  .fr-meter { position: relative; height: 24px; background: #0a0a14; border-radius: 12px; overflow: hidden; border: 1px solid #1e1e3a; }
+  .fr-zone { position: absolute; top: 0; bottom: 0; transition: width 0.6s ease; }
+  .fr-zone.long { background: linear-gradient(90deg, #064e3b, #10b981); right: 50%; left: auto; }
+  .fr-zone.short { background: linear-gradient(90deg, #dc2626, #ef4444); left: 50%; right: auto; }
+  .fr-needle { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; border-radius: 1px; transition: left 0.6s ease; box-shadow: 0 0 4px rgba(255,255,255,0.5); }
+  .fr-center-label { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 10px; color: #6b7280; font-weight: 600; }
+  .fr-scale { display: flex; justify-content: space-between; font-size: 10px; color: #6b7280; margin-top: 4px; }
+  .fr-labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 6px; }
+  .fr-label-long { color: #34d399; font-weight: 600; }
+  .fr-label-short { color: #f87171; font-weight: 600; }
+
+  /* ── CVD ── */
+  .cvd-area-wrap { height: 80px; position: relative; }
+  .cvd-base-line { position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed #2a2a4a; pointer-events: none; }
+  .cvd-label { font-size: 11px; color: #6b7280; margin-top: 4px; }
+  .cvd-label span { font-weight: 700; }
+  .cvd-label span.pos { color: #34d399; }
+  .cvd-label span.neg { color: #f87171; }
+  .cvd-label span.neu { color: #9ca3af; }
+
+  /* ── Liquidation heatmap ── */
+  .liq-levels { display: flex; flex-direction: column; gap: 6px; }
+  .liq-row { display: flex; align-items: center; gap: 8px; }
+  .liq-label { font-size: 10px; color: #6b7280; width: 56px; flex-shrink: 0; text-align: right; }
+  .liq-bar-track { flex: 1; height: 14px; background: #0a0a14; border-radius: 3px; border: 1px solid #1e1e3a; overflow: hidden; position: relative; }
+  .liq-bar-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+  .liq-bar-fill.long { background: linear-gradient(90deg, #7f1d1d, #ef4444); }
+  .liq-bar-fill.short { background: linear-gradient(90deg, #10b981, #059669); }
+  .liq-bar-fill.medium { background: linear-gradient(90deg, #92400e, #fb923c); }
+  .liq-pct { font-size: 11px; font-weight: 700; width: 36px; flex-shrink: 0; }
+  .liq-pct.dn { color: #f87171; }
+  .liq-pct.up { color: #34d399; }
+  .liq-direction { font-size: 11px; color: #6b7280; padding: 6px 10px; border-radius: 4px; background: #0a0a14; border: 1px solid #1e1e3a; margin-top: 4px; text-align: center; }
+  .liq-direction span { font-weight: 700; }
+  .liq-direction span.dn { color: #f87171; }
+  .liq-direction span.up { color: #34d399; }
+
+  /* ── OBI gauge ── */
+  .obi-display { display: flex; align-items: center; gap: 16px; }
+  .obi-arc-wrap { position: relative; width: 100px; height: 60px; flex-shrink: 0; }
+  .obi-value-lg { font-size: 28px; font-weight: 700; color: #d1d5db; flex: 1; }
+  .obi-value-lg.up { color: #34d399; }
+  .obi-value-lg.dn { color: #f87171; }
+  .obi-interpretation { font-size: 11px; color: #6b7280; margin-top: 4px; }
+  .obi-interpretation span { font-weight: 700; }
+  .obi-interpretation span.up { color: #34d399; }
+  .obi-interpretation span.dn { color: #f87171; }
+
+  /* ── Open Interest ── */
+  .oi-row { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+  .oi-current { font-size: 20px; font-weight: 700; color: #a78bfa; }
+  .oi-change { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+  .oi-change.up { background: #064e3b; color: #34d399; }
+  .oi-change.dn { background: #450a0a; color: #f87171; }
+  .oi-interpretation { font-size: 11px; color: #6b7280; margin-top: 4px; }
+
+  /* ── Confidence consensus ── */
+  .confidence-card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 18px 20px; margin-bottom: 24px; }
+  .conf-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .conf-title { font-size: 14px; font-weight: 700; color: #d1d5db; }
+  .conf-score { font-size: 18px; font-weight: 700; }
+  .conf-score.strong-up { color: #10b981; }
+  .conf-score.strong-down { color: #ef4444; }
+  .conf-score.weak-up { color: #34d399; }
+  .conf-score.weak-down { color: #f87171; }
+  .conf-score.neutral { color: #9ca3af; }
+  .conf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .conf-chip { padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .conf-chip.agree { background: #064e3b; color: #34d399; }
+  .conf-chip.disagree { background: #450a0a; color: #f87171; }
+  .conf-chip.skip { background: #1e1e3a; color: #6b7280; }
+  .conf-track { height: 6px; background: #1e1e3a; border-radius: 3px; overflow: hidden; }
+  .conf-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; background: linear-gradient(90deg, #7c3aed, #a78bfa); }
+
+  /* ── Pivot points ── */
+  .pivot-levels { display: flex; flex-direction: column; gap: 6px; }
+  .pivot-row { display: flex; align-items: center; gap: 8px; }
+  .pivot-type { font-size: 10px; width: 52px; flex-shrink: 0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .pivot-type.res { color: #f87171; }
+  .pivot-type.sup { color: #34d399; }
+  .pivot-type.mid { color: #a78bfa; }
+  .pivot-price { font-size: 14px; font-weight: 700; color: #d1d5db; width: 90px; flex-shrink: 0; }
+  .pivot-track { flex: 1; height: 6px; background: #0a0a14; border-radius: 3px; border: 1px solid #1e1e3a; overflow: hidden; }
+  .pivot-marker { height: 100%; border-radius: 3px; }
+  .pivot-marker.res { background: linear-gradient(90deg, #7f1d1d, #ef4444); }
+  .pivot-marker.sup { background: linear-gradient(90deg, #064e3b, #10b981); }
+  .pivot-marker.mid { background: linear-gradient(90deg, #4c1d95, #7c3aed); }
+  .pivot-spot { font-size: 11px; color: #9ca3af; width: 70px; flex-shrink: 0; text-align: right; }
+  .pivot-spot span { font-weight: 700; color: #d1d5db; }
+
+  /* ── Tooltip helper ── */
+  .ind-tip { font-size: 11px; color: #6b7280; background: #0a0a14; border: 1px solid #1e1e3a; border-radius: 6px; padding: 8px 10px; line-height: 1.5; }
+  .ind-tip strong { color: #a78bfa; }
+  .ind-tip .bull { color: #34d399; }
+  .ind-tip .bear { color: #f87171; }
+
+  /* ── Signal recommendation panel ── */
+  .signal-panel { background: #12122a; border: 1px solid #1e1e3a; border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; }
+  .signal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 16px; flex-wrap: wrap; }
+  .signal-title { font-size: 15px; font-weight: 700; color: #d1d5db; }
+  .signal-meta { display: flex; gap: 16px; font-size: 12px; color: #6b7280; }
+  .signal-badge-wrap { display: flex; align-items: center; gap: 12px; }
+  .signal-strength-ring { position: relative; width: 64px; height: 64px; flex-shrink: 0; }
+  .strength-ring-canvas { width: 64px !important; height: 64px !important; }
+  .strength-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .strength-num { font-size: 20px; font-weight: 800; line-height: 1; }
+  .strength-label { font-size: 9px; color: #6b7280; text-transform: uppercase; margin-top: 2px; }
+  .signal-action-block { display: flex; flex-direction: column; gap: 4px; min-width: 200px; }
+  .action-main { font-size: 20px; font-weight: 800; }
+  .action-main.enter-full { color: #059669; }
+  .action-main.enter-half { color: #10b981; }
+  .action-main.enter-quarter { color: #34d399; }
+  .action-main.skip { color: #6b7280; }
+  .action-direction { font-size: 13px; font-weight: 700; }
+  .action-direction.up { color: #34d399; }
+  .action-direction.dn { color: #f87171; }
+  .action-pos { font-size: 12px; color: #9ca3af; }
+  .signal-stats { display: flex; gap: 20px; flex-wrap: wrap; }
+  .sig-stat { display: flex; flex-direction: column; gap: 2px; }
+  .sig-stat-label { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+  .sig-stat-value { font-size: 15px; font-weight: 700; }
+  .sig-stat-value.up { color: #34d399; }
+  .sig-stat-value.dn { color: #f87171; }
+  .sig-stat-value.ne { color: #9ca3af; }
+  .sig-stat-value.pu { color: #a78bfa; }
+  .signal-indicators { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .sig-ind-chip { padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .sig-ind-chip.up { background: rgba(16,185,129,0.15); color: #34d399; }
+  .sig-ind-chip.dn { background: rgba(239,68,68,0.15); color: #f87171; }
+  .sig-ind-chip.skip { background: #1e1e3a; color: #6b7280; }
+  .sig-ind-chip.confirm { background: rgba(167,139,250,0.15); color: #a78bfa; }
+  .signal-time-bar { margin-top: 12px; }
+  .time-bar-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .time-bar-track { height: 6px; background: #1e1e3a; border-radius: 3px; overflow: hidden; position: relative; }
+  .time-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+  .filter-alert { border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-top: 8px; display: none; }
+  .filter-alert.skip-alert { background: #450a0a; border: 1px solid #7f1d1d; color: #f87171; }
+  .filter-alert.confirm-alert { background: rgba(167,139,250,0.1); border: 1px solid #7c3aed; color: #a78bfa; }
+  .filter-alert.reduce-alert { background: rgba(251,191,36,0.1); border: 1px solid #d97706; color: #fbbf24; }
+  .filter-alert.show { display: block; }
+
+  /* ── Loading state ── */
+  .ind-card .loading-overlay { position: absolute; inset: 0; background: rgba(10,10,20,0.8); display: flex; align-items: center; justify-content: center; border-radius: 10px; }
+  .spinner { width: 24px; height: 24px; border: 2px solid #1e1e3a; border-top-color: #7c3aed; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Last updated ── */
+  .last-updated { font-size: 11px; color: #4b5563; text-align: right; margin-bottom: 8px; }
+
+  /* ── Full width for large charts ── */
+  .full-span { grid-column: span 1; }
+  .wide-span { grid-column: span 2; }
+
+  /* ── Responsive ── */
+  @media (max-width: 1100px) {
+    .core-grid, .adv-grid { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 768px) {
+    nav { padding: 0 12px; gap: 4px; }
+    nav a { padding: 6px 10px; font-size: 13px; }
+    nav .brand { margin-right: 8px; font-size: 15px; }
+    .container { padding: 16px; }
+    .spot-strip { grid-template-columns: 1fr; }
+    .core-grid, .adv-grid { grid-template-columns: 1fr; }
+    .page-header { flex-direction: column; align-items: flex-start; }
+    .rsi-row { flex-direction: column; }
+    .rsi-gauge-wrap { width: 100%; }
+  }
+  @media (max-width: 540px) {
+    .container { padding: 12px; }
+    .spot-strip { grid-template-columns: 1fr; }
+    .core-grid, .adv-grid { grid-template-columns: 1fr; gap: 12px; }
+  }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<nav>
+  <span class="brand">Polymarket</span>
+  <a href="/">控制台</a>
+  <a href="/trades">交易记录</a>
+  <a href="/indicators" class="active">指标面板</a>
+  <a href="/config">配置</a>
+  <div class="nav-right">
+    <div class="nav-status">
+      <span class="live-dot" id="ws-dot"></span>
+      <span id="ws-label">连接中</span>
+    </div>
+  </div>
+</nav>
+<div class="container">
+
+  <!-- Header -->
+  <div class="page-header">
+    <div class="page-title">
+      <span class="icon">📊</span>
+      指标面板
+    </div>
+    <div class="asset-selector">
+      <button class="asset-btn active" id="btn-btc" onclick="selectAsset('BTC')">₿ BTC</button>
+      <button class="asset-btn" id="btn-eth" onclick="selectAsset('ETH')">Ξ ETH</button>
+    </div>
+  </div>
+
+  <div class="last-updated" id="last-updated">数据加载中...</div>
+
+  <!-- ── Signal recommendation panel ── -->
+  <div class="signal-panel" id="signal-panel" style="display:none">
+    <div class="signal-header">
+      <div class="signal-title">交易信号推荐</div>
+      <div class="signal-meta">
+        <span id="sig-elapsed">--</span>
+        <span>|</span>
+        <span id="sig-remaining">剩余 --</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+      <!-- Strength ring -->
+      <div class="signal-badge-wrap">
+        <div class="signal-strength-ring">
+          <canvas id="strength-ring-canvas" class="strength-ring-canvas"></canvas>
+          <div class="strength-center">
+            <span class="strength-num" id="strength-num">--</span>
+            <span class="strength-label">强度</span>
+          </div>
+        </div>
+      </div>
+      <!-- Action recommendation -->
+      <div class="signal-action-block">
+        <div class="action-main skip" id="action-main">加载中...</div>
+        <div class="action-direction" id="action-direction">--</div>
+        <div class="action-pos" id="action-pos">建议仓位：--</div>
+      </div>
+      <!-- Key stats -->
+      <div class="signal-stats">
+        <div class="sig-stat">
+          <div class="sig-stat-label">Core 共识</div>
+          <div class="sig-stat-value pu" id="sig-core">--/6</div>
+        </div>
+        <div class="sig-stat">
+          <div class="sig-stat-label">动态止盈</div>
+          <div class="sig-stat-value up" id="sig-tp">--%</div>
+        </div>
+        <div class="sig-stat">
+          <div class="sig-stat-label">动态止损</div>
+          <div class="sig-stat-value dn" id="sig-sl">--%</div>
+        </div>
+        <div class="sig-stat">
+          <div class="sig-stat-label">锚点偏离</div>
+          <div class="sig-stat-value ne" id="sig-anchor">--%</div>
+        </div>
+        <div class="sig-stat">
+          <div class="sig-stat-label">UP/DOWN 价格</div>
+          <div class="sig-stat-value" id="sig-price" style="font-size:13px">-- / --</div>
+        </div>
+      </div>
+    </div>
+    <!-- Core 6 chip row -->
+    <div class="signal-indicators" id="sig-core-chips"></div>
+    <!-- Advanced confirm chips -->
+    <div class="signal-indicators" id="sig-adv-chips" style="margin-top:4px"></div>
+    <!-- Filter alert -->
+    <div class="filter-alert" id="filter-alert"></div>
+    <!-- Time progress bar -->
+    <div class="signal-time-bar">
+      <div class="time-bar-label">
+        <span>时间窗口进度</span>
+        <span id="time-zone-label">--</span>
+      </div>
+      <div class="time-bar-track">
+        <div class="time-bar-fill" id="time-bar-fill" style="width:0%"></div>
+        <div style="position:absolute;top:0;left:20%;bottom:0;width:26.7%;background:#059669;opacity:0.3;border-radius:3px" title="最佳窗口 T=3~7min"></div>
+        <div style="position:absolute;top:0;left:46.7%;bottom:0;width:33.3%;background:#92400e;opacity:0.3;border-radius:3px" title="过渡期 T=7~12min"></div>
+        <div style="position:absolute;top:0;left:80%;bottom:0;width:20%;background:#7f1d1d;opacity:0.3;border-radius:3px" title="危险期 T=12~15min"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spot prices strip -->
+  <div class="spot-strip">
+    <div class="spot-card">
+      <span class="spot-icon">₿</span>
+      <div class="spot-info">
+        <div class="spot-label">BTC 现货价</div>
+        <div class="spot-value" id="spot-btc">--</div>
+        <div class="spot-sub" id="spot-btc-time">--</div>
+      </div>
+    </div>
+    <div class="spot-card">
+      <span class="spot-icon">Ξ</span>
+      <div class="spot-info">
+        <div class="spot-label">ETH 现货价</div>
+        <div class="spot-value" id="spot-eth">--</div>
+        <div class="spot-sub" id="spot-eth-time">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Consensus sentiment -->
+  <div class="confidence-card">
+    <div class="conf-header">
+      <div class="conf-title">核心指标信号强度 <span style="font-weight:400;color:#6b7280;font-size:12px">（Core 6）</span></div>
+      <div class="conf-score neutral" id="conf-score">-- / 6</div>
+    </div>
+    <div class="conf-chips" id="conf-chips"></div>
+    <div class="conf-track">
+      <div class="conf-fill" id="conf-fill" style="width:0%"></div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:16px;font-size:12px;color:#6b7280;">
+      <span>核心指标 → 信号强度</span>
+      <span style="margin-left:auto">≥3/6 → 建议开仓 | &lt;3 → 跳过</span>
+    </div>
+  </div>
+
+  <!-- Sentiment bar -->
+  <div class="sentiment-bar">
+    <div class="sentiment-header">
+      <div class="sentiment-title">指标方向分布</div>
+      <div class="sentiment-count">
+        <span class="up-count" id="agree-up-count">0</span> 多头 &nbsp;|&nbsp;
+        <span class="down-count" id="agree-down-count">0</span> 空头
+      </div>
+    </div>
+    <div class="sentiment-track">
+      <div class="sb-up" id="sb-up" style="width:0%"></div>
+      <div class="sb-down" id="sb-down" style="width:0%"></div>
+    </div>
+    <div class="sentiment-labels">
+      <span class="sl-up">⬆ UP 信号</span>
+      <span class="sl-down">⬇ DOWN 信号</span>
+    </div>
+  </div>
+
+  <!-- ── CORE 6 ── -->
+  <div class="section-title section-gap">核心指标 · Core 6</div>
+  <div class="core-grid">
+
+    <!-- 1. RSI -->
+    <div class="ind-card neutral" id="card-rsi">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">RSI · 相对强弱指数</div>
+          <div class="ind-sub">周期 14 · 超买 70 / 超卖 30</div>
+        </div>
+        <span class="ind-badge flat" id="rsi-badge">--</span>
+      </div>
+      <div class="rsi-row">
+        <div class="rsi-gauge-wrap">
+          <canvas id="rsi-gauge-canvas"></canvas>
+        </div>
+        <div class="rsi-info">
+          <div class="rsi-signal" id="rsi-signal-up">
+            <span class="rsi-signal-dot oversold"></span>
+            <span class="rsi-signal-text">RSI &lt; 30 <strong class="overs">超卖 → 关注 UP</strong></span>
+          </div>
+          <div class="rsi-signal" id="rsi-signal-down">
+            <span class="rsi-signal-dot overbought"></span>
+            <span class="rsi-signal-text">RSI &gt; 70 <strong class="overb">超买 → 关注 DOWN</strong></span>
+          </div>
+          <div class="rsi-signal" id="rsi-signal-flat">
+            <span class="rsi-signal-dot neutral"></span>
+            <span class="rsi-signal-text">RSI 45-55 <strong>中性 → 跳过</strong></span>
+          </div>
+        </div>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">当前 RSI</div><div class="iv-value pu" id="rsi-value">--</div></div>
+        <div class="iv-item"><div class="iv-label">读数区域</div><div class="iv-value ne" id="rsi-zone">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>RSI&gt;70后回落至70以下 → <span class="bear">DOWN</span>；RSI&lt;30后反弹至30以上 → <span class="bull">UP</span>；45-55 → 跳过</div>
+    </div>
+
+    <!-- 2. MACD -->
+    <div class="ind-card neutral" id="card-macd">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">MACD · 12/26/9</div>
+          <div class="ind-sub">信号线交叉 · 柱状图动量</div>
+        </div>
+        <span class="ind-badge flat" id="macd-badge">--</span>
+      </div>
+      <div class="chart-wrap" style="height:80px">
+        <canvas id="macd-chart"></canvas>
+      </div>
+      <div class="macd-legend">
+        <div class="macd-legend-item"><span class="macd-legend-dot pos"></span>柱状图(正)</div>
+        <div class="macd-legend-item"><span class="macd-legend-dot neg"></span>柱状图(负)</div>
+        <div class="macd-legend-item"><span class="macd-legend-dot sig"></span>信号线</div>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">MACD 线</div><div class="iv-value pu" id="macd-line">--</div></div>
+        <div class="iv-item"><div class="iv-label">信号线</div><div class="iv-value ne" id="macd-signal">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>绿柱扩张 → <span class="bull">UP 动能加速</span>；红柱扩张 → <span class="bear">DOWN 动能加速</span>；收缩至零轴 → 预警，观望</div>
+    </div>
+
+    <!-- 3. VWAP -->
+    <div class="ind-card neutral" id="card-vwap">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">VWAP · 成交量加权均价</div>
+          <div class="ind-sub">机构成本基准 · 纽约时段最佳</div>
+        </div>
+        <span class="ind-badge flat" id="vwap-badge">--</span>
+      </div>
+      <div class="chart-wrap" style="height:80px">
+        <canvas id="vwap-chart"></canvas>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">VWAP</div><div class="iv-value pu" id="vwap-value">--</div></div>
+        <div class="iv-item"><div class="iv-label">相对位置</div><div class="iv-value ne" id="vwap-relative">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>价格在 VWAP 上方 + MACD 绿 → <span class="bull">UP</span>；远离 VWAP + RSI&gt;70 → <span class="bear">DOWN</span>；回踩 VWAP 反弹 → <span class="bull">UP</span></div>
+    </div>
+
+    <!-- 4. EMA 9/21 -->
+    <div class="ind-card neutral" id="card-ema">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">EMA 9 &amp; EMA 21</div>
+          <div class="ind-sub">指数移动平均线 · 交叉信号</div>
+        </div>
+        <span class="ind-badge flat" id="ema-badge">--</span>
+      </div>
+      <div class="chart-wrap" style="height:80px">
+        <canvas id="ema-chart"></canvas>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">EMA 9</div><div class="iv-value up" id="ema-9">--</div></div>
+        <div class="iv-item"><div class="iv-label">EMA 21</div><div class="iv-value dn" id="ema-21">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>EMA9 上穿 EMA21 → <span class="bull">UP</span>；下穿 → <span class="bear">DOWN</span>；无交叉时以当前位置排列方向为准</div>
+    </div>
+
+    <!-- 5. Pivot Points HL10 -->
+    <div class="ind-card neutral" id="card-pivot">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">Pivot HL10</div>
+          <div class="ind-sub">最近10根K线高/低点</div>
+        </div>
+        <span class="ind-badge flat" id="pivot-badge">--</span>
+      </div>
+      <div class="pivot-levels">
+        <div class="pivot-row">
+          <span class="pivot-type res">阻力</span>
+          <span class="pivot-price" id="pivot-high">--</span>
+          <div class="pivot-track"><div class="pivot-marker res" id="pivot-high-bar" style="width:0%"></div></div>
+          <span class="pivot-spot">高 <span id="pivot-dist-high">--</span></span>
+        </div>
+        <div class="pivot-row">
+          <span class="pivot-type mid">中轴</span>
+          <span class="pivot-price" id="pivot-mid">--</span>
+          <div class="pivot-track"><div class="pivot-marker mid" id="pivot-mid-bar" style="width:0%"></div></div>
+          <span class="pivot-spot">当前 <span id="pivot-dist-mid">--</span></span>
+        </div>
+        <div class="pivot-row">
+          <span class="pivot-type sup">支撑</span>
+          <span class="pivot-price" id="pivot-low">--</span>
+          <div class="pivot-track"><div class="pivot-marker sup" id="pivot-low-bar" style="width:0%"></div></div>
+          <span class="pivot-spot">低 <span id="pivot-dist-low">--</span></span>
+        </div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>突破 HL10 高 → <span class="bull">UP</span>；跌破 HL10 低 → <span class="bear">DOWN</span>；触及支撑反弹 → <span class="bull">UP</span>；中轴区间 → 跳过</div>
+    </div>
+
+    <!-- 6. Bollinger Bands -->
+    <div class="ind-card neutral" id="card-bbands">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">Bollinger Bands</div>
+          <div class="ind-sub">均值回归 · 20周期 ±2σ</div>
+        </div>
+        <span class="ind-badge flat" id="bbands-badge">--</span>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">上轨</div><div class="iv-value up" id="bbands-upper">--</div></div>
+        <div class="iv-item"><div class="iv-label">中轨</div><div class="iv-value flat" id="bbands-mid">--</div></div>
+        <div class="iv-item"><div class="iv-label">下轨</div><div class="iv-value dn" id="bbands-lower">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>价格触及上轨 → <span class="bear">DOWN</span>（均值回归）；触及下轨 → <span class="bull">UP</span>（均值回归）；通道内 → 跳过</div>
+    </div>
+
+  </div>
+
+  <!-- ── ADVANCED 5 ── -->
+  <div class="section-title section-gap">高级指标 · Advanced 5</div>
+  <div class="adv-grid">
+
+    <!-- 6. Funding Rate -->
+    <div class="ind-card neutral" id="card-funding">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">Funding Rate · 资金费率</div>
+          <div class="ind-sub">8h周期 · 多头/空头支付方向</div>
+        </div>
+        <span class="ind-badge flat" id="funding-badge">--</span>
+      </div>
+      <div class="fr-meter">
+        <div class="fr-zone long" id="fr-zone-long" style="width:0%"></div>
+        <div class="fr-zone short" id="fr-zone-short" style="width:0%"></div>
+        <div class="fr-needle" id="fr-needle" style="left:50%"></div>
+        <span class="fr-center-label">0</span>
+      </div>
+      <div class="fr-scale"><span style="color:#f87171">-0.15%</span><span style="color:#9ca3af">-0.05%</span><span style="color:#9ca3af">0</span><span style="color:#9ca3af">+0.05%</span><span style="color:#34d399">+0.15%</span></div>
+      <div class="fr-labels">
+        <span class="fr-label-long" id="fr-label-long">多头支付空头</span>
+        <span class="fr-label-short" id="fr-label-short">空头支付多头</span>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">当前费率</div><div class="iv-value ne" id="funding-value">--</div></div>
+        <div class="iv-item"><div class="iv-label">方向</div><div class="iv-value ne" id="funding-direction">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>Funding &gt;+0.05% → 偏 <span class="bear">DOWN</span>；&lt;-0.05% → 偏 <span class="bull">UP</span>；接近 0 → 中性</div>
+    </div>
+
+    <!-- 7. CVD -->
+    <div class="ind-card neutral" id="card-cvd">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">CVD · 累计成交量差</div>
+          <div class="ind-sub">主动买入 - 主动卖出</div>
+        </div>
+        <span class="ind-badge flat" id="cvd-badge">--</span>
+      </div>
+      <div class="cvd-area-wrap">
+        <div class="cvd-base-line"></div>
+        <canvas id="cvd-chart"></canvas>
+      </div>
+      <div class="cvd-label">
+        当前 CVD: <span class="pos" id="cvd-value">--</span> |
+        <span id="cvd-interpretation">等待数据...</span>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>CVD 上升 + 价格横盘 → <span class="bull">蓄力 UP</span>；CVD 下降 + 价格横盘 → <span class="bear">蓄力 DOWN</span>；背离 → 最强反转信号</div>
+    </div>
+
+    <!-- 8. Liquidation Heatmap -->
+    <div class="ind-card neutral" id="card-liq">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">Liquidation Heatmap · 清算热力图</div>
+          <div class="ind-sub">Coinglass 数据源</div>
+        </div>
+        <span class="ind-badge flat" id="liq-badge">--</span>
+      </div>
+      <div class="liq-levels">
+        <div class="liq-row">
+          <span class="liq-label">多头密集</span>
+          <div class="liq-bar-track"><div class="liq-bar-fill long" id="liq-long-bar" style="width:0%"></div></div>
+          <span class="liq-pct dn" id="liq-long-pct">--</span>
+        </div>
+        <div class="liq-row">
+          <span class="liq-label">空头密集</span>
+          <div class="liq-bar-track"><div class="liq-bar-fill short" id="liq-short-bar" style="width:0%"></div></div>
+          <span class="liq-pct up" id="liq-short-pct">--</span>
+        </div>
+      </div>
+      <div class="liq-direction" id="liq-direction">多头清算集群: <span class="dn">--</span> | 空头清算集群: <span class="up">--</span></div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">多头集群距离</div><div class="iv-value dn" id="liq-long-dist">--</div></div>
+        <div class="iv-item"><div class="iv-label">空头集群距离</div><div class="iv-value up" id="liq-short-dist">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>密集多头集群下方 → <span class="bear">价格被向下吸</span>；密集空头集群上方 → <span class="bull">价格被向上吸</span></div>
+    </div>
+
+    <!-- 9. OBI -->
+    <div class="ind-card neutral" id="card-obi">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">OBI · 订单簿失衡</div>
+          <div class="ind-sub">Top 10 档位买卖量比值</div>
+        </div>
+        <span class="ind-badge flat" id="obi-badge">--</span>
+      </div>
+      <div class="obi-display">
+        <div class="obi-arc-wrap">
+          <canvas id="obi-gauge-canvas"></canvas>
+        </div>
+        <div>
+          <div class="obi-value-lg" id="obi-value">--</div>
+          <div class="obi-interpretation">订单簿 <span id="obi-interpretation">--</span></div>
+        </div>
+      </div>
+      <div class="ind-values">
+        <div class="iv-item"><div class="iv-label">买量合计</div><div class="iv-value up" id="obi-bids">--</div></div>
+        <div class="iv-item"><div class="iv-label">卖量合计</div><div class="iv-value dn" id="obi-asks">--</div></div>
+      </div>
+      <div class="ind-tip"><strong>规则：</strong>OBI &gt;1.5 → <span class="bull">短期 UP 压力</span>；&lt;0.67 → <span class="bear">DOWN 压力</span>；±0.2 → 均衡无信号</div>
+    </div>
+
+    <!-- 10. Open Interest -->
+    <div class="ind-card neutral" id="card-oi">
+      <div class="ind-header">
+        <div class="ind-title-wrap">
+          <div class="ind-name">Open Interest · 未平仓合约</div>
+          <div class="ind-sub">持仓量 · 资金进出方向</div>
+        </div>
+        <span class="ind-badge flat" id="oi-badge">--</span>
+      </div>
+      <div class="chart-wrap" style="height:80px">
+        <canvas id="oi-chart"></canvas>
+      </div>
+      <div class="oi-row">
+        <span class="oi-current" id="oi-current">--</span>
+        <span class="oi-change" id="oi-change">--</span>
+        <span style="font-size:11px;color:#6b7280">vs 24h前</span>
+      </div>
+      <div class="oi-interpretation" id="oi-interpretation">等待数据...</div>
+      <div class="ind-tip"><strong>规则：</strong>价格↑+OI↑ → <span class="bull">新多跟进，趋势延续</span>；价格↑+OI↓ → <span class="bear">空头平仓，反转预警</span>；量价OI同向 → 真实信号</div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('pm_token') || '';
+let currentAsset = 'BTC';
+let indicators = null;
+let signalData = null;
+let wsOnline = false;
+let retryDelay = 2000;
+let retryTimer = null;
+let pollTimer = null;
+let ws = null;
+let wsInd = null;   // WebSocket for /ws/indicators (real-time push)
+let wsIndRetryDelay = 2000;
+// ── Chart.js defaults (dark theme) ──────────────────────────────
+const CHART_DEFAULTS = {
+  color: '#6b7280',
+  borderColor: '#1e1e3a',
+  font: { family: '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif', size: 11 }
+};
+Chart.defaults.color = '#6b7280';
+Chart.defaults.borderColor = '#1e1e3a';
+Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
+Chart.defaults.font.size = 11;
+
+// ── Chart instances ─────────────────────────────────────────────
+let rsiGauge = null;
+let macdChart = null;
+let vwapChart = null;
+let emaChart = null;
+let cvdChart = null;
+let oiChart = null;
+let obiGauge = null;
+
+// ── Helpers ─────────────────────────────────────────────────────
+async function api(path, opts={}) {
+  const r = await fetch(API + path, {
+    ...opts,
+    signal: AbortSignal.timeout(15000),
+    headers: { ...opts.headers, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  if (r.status === 401) { window.location.href = '/login'; return null; }
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    console.error('API error', r.status, text);
+    return null;
+  }
+  return r.json();
+}
+
+function fmtBJ(d) {
+  if (!d) return '--';
+  const s = typeof d === 'string' ? d : d.toISOString();
+  var iso = s.endsWith('Z') ? s.slice(0, -1) : s.includes('+') ? s.replace(/\+\d{2}:\d{2}$/, '') : s;
+  return new Date(iso + 'Z').toLocaleTimeString('en-US', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZone: 'Asia/Shanghai',
+  });
+}
+
+function formatNum(n, decimals=2) {
+  if (n == null || isNaN(n)) return '--';
+  return Number(n).toFixed(decimals);
+}
+
+function fmtPct(n) {
+  if (n == null || isNaN(n)) return '--';
+  return (Number(n) * 100).toFixed(2) + '%';
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// ── Gauge helpers ────────────────────────────────────────────────
+function drawRSIGauge(canvasId, value) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth * 2;
+  const h = canvas.height = canvas.offsetHeight * 2;
+  ctx.clearRect(0, 0, w, h);
+
+  const cx = w / 2, cy = h - 10;
+  const r = Math.min(w, h) / 2 - 10;
+  const startAngle = Math.PI, endAngle = 0;
+
+  // bg arc
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, startAngle, endAngle);
+  ctx.strokeStyle = '#1e1e3a';
+  ctx.lineWidth = 12;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // zones
+  const zones = [
+    { from: 0, to: 30, color: '#10b981' },
+    { from: 30, to: 70, color: '#4b5563' },
+    { from: 70, to: 100, color: '#ef4444' },
+  ];
+  zones.forEach(z => {
+    const sa = Math.PI - (z.from / 100) * Math.PI;
+    const ea = Math.PI - (z.to / 100) * Math.PI;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, sa, ea);
+    ctx.strokeStyle = z.color + '55';
+    ctx.lineWidth = 12;
+    ctx.lineCap = 'butt';
+    ctx.stroke();
+  });
+
+  // value arc
+  if (value != null && !isNaN(value)) {
+    const v = clamp(Number(value), 0, 100);
+    const sa = Math.PI;
+    const ea = Math.PI - (v / 100) * Math.PI;
+    const color = v > 70 ? '#ef4444' : v < 30 ? '#10b981' : '#a78bfa';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, sa, ea);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 12;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
+  // labels
+  ctx.fillStyle = '#6b7280';
+  ctx.font = `${22 * 2}px -apple-system, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText(value != null ? Number(value).toFixed(0) : '--', cx, cy - 20);
+}
+
+function drawOBIGauge(canvasId, value) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth * 2;
+  const h = canvas.height = canvas.offsetHeight * 2;
+  ctx.clearRect(0, 0, w, h);
+
+  const cx = w / 2, cy = h - 5;
+  const rx = w / 2 - 8, ry = h - 12;
+  const startAngle = Math.PI, endAngle = 0;
+
+  // bg arc
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, startAngle, endAngle);
+  ctx.strokeStyle = '#1e1e3a';
+  ctx.lineWidth = 10;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  if (value != null && !isNaN(value)) {
+    const v = clamp(Number(value), 0, 3);
+    const pct = v / 3;
+    const color = pct > 0.5 ? '#10b981' : pct < 0.22 ? '#ef4444' : '#a78bfa';
+    const sa = Math.PI;
+    const ea = Math.PI - pct * Math.PI;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, sa, ea);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 10;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+// ── Init charts ─────────────────────────────────────────────────
+function initCharts() {
+  const macdCtx = document.getElementById('macd-chart');
+  if (macdCtx) {
+    if (macdChart) macdChart.destroy();
+    macdChart = new Chart(macdCtx, {
+      type: 'bar',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: '柱状图',
+            data: [],
+            backgroundColor: [],
+            borderRadius: 2,
+            barThickness: 8,
+          },
+          {
+            label: '信号线',
+            data: [],
+            type: 'line',
+            borderColor: '#a78bfa',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension: 0.4,
+            borderDash: [3, 3],
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: '#1e1e3a' },
+            ticks: { maxTicksLimit: 3 },
+          }
+        },
+        animation: { duration: 400 }
+      }
+    });
+  }
+
+  const vwapCtx = document.getElementById('vwap-chart');
+  if (vwapCtx) {
+    if (vwapChart) vwapChart.destroy();
+    vwapChart = new Chart(vwapCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: '价格',
+            data: [],
+            borderColor: '#d1d5db',
+            backgroundColor: 'rgba(209,213,219,0.05)',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+          },
+          {
+            label: 'VWAP',
+            data: [],
+            borderColor: '#a78bfa',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+            borderDash: [4, 4],
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: '#1e1e3a' },
+            ticks: { maxTicksLimit: 3 },
+          }
+        },
+        animation: { duration: 400 }
+      }
+    });
+  }
+
+  const emaCtx = document.getElementById('ema-chart');
+  if (emaCtx) {
+    if (emaChart) emaChart.destroy();
+    emaChart = new Chart(emaCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'EMA 9',
+            data: [],
+            borderColor: '#10b981',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+          },
+          {
+            label: 'EMA 21',
+            data: [],
+            borderColor: '#ef4444',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+          },
+          {
+            label: 'Price',
+            data: [],
+            borderColor: '#9ca3af',
+            backgroundColor: 'transparent',
+            borderWidth: 1,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: '#1e1e3a' },
+            ticks: { maxTicksLimit: 3 },
+          }
+        },
+        animation: { duration: 400 }
+      }
+    });
+  }
+
+  const cvdCtx = document.getElementById('cvd-chart');
+  if (cvdCtx) {
+    if (cvdChart) cvdChart.destroy();
+    cvdChart = new Chart(cvdCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'CVD',
+          data: [],
+          borderColor: '#a78bfa',
+          backgroundColor: (ctx) => {
+            const v = ctx.dataset.data[ctx.dataIndex] || 0;
+            return v >= 0 ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+          },
+          fill: true,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.4,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: '#1e1e3a' },
+            ticks: { maxTicksLimit: 3 },
+          }
+        },
+        animation: { duration: 400 }
+      }
+    });
+  }
+
+  const oiCtx = document.getElementById('oi-chart');
+  if (oiCtx) {
+    if (oiChart) oiChart.destroy();
+    oiChart = new Chart(oiCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'OI',
+          data: [],
+          borderColor: '#a78bfa',
+          backgroundColor: 'rgba(167,139,250,0.1)',
+          fill: true,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.4,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: '#1e1e3a' },
+            ticks: { maxTicksLimit: 3 },
+          }
+        },
+        animation: { duration: 400 }
+      }
+    });
+  }
+}
+
+// ── Update charts with data ─────────────────────────────────────
+function updateCharts(data) {
+  // MACD
+  if (macdChart && data.macd) {
+    const hist = data.macd.histogram || [];
+    const sig = data.macd.signal || [];
+    const bg = hist.map(v => v >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)');
+    macdChart.data.labels = hist.map((_, i) => i);
+    macdChart.data.datasets[0].data = hist;
+    macdChart.data.datasets[0].backgroundColor = bg;
+    macdChart.data.datasets[1].data = sig;
+    macdChart.update('none');
+  }
+
+  // VWAP
+  if (vwapChart && data.vwap) {
+    vwapChart.data.labels = (data.vwap.price || []).map((_, i) => i);
+    vwapChart.data.datasets[0].data = data.vwap.price || [];
+    vwapChart.data.datasets[1].data = data.vwap.vwap || [];
+    vwapChart.update('none');
+  }
+
+  // EMA
+  if (emaChart && data.ema) {
+    emaChart.data.labels = (data.ema.ema9 || []).map((_, i) => i);
+    emaChart.data.datasets[0].data = data.ema.ema9_history || [];
+    emaChart.data.datasets[1].data = data.ema.ema21_history || [];
+    emaChart.data.datasets[2].data = data.ema.price || [];
+    emaChart.update('none');
+  }
+
+  // CVD
+  if (cvdChart && data.cvd) {
+    const hist = data.cvd.history || [];
+    const vals = data.cvd.history || [];
+    cvdChart.data.labels = hist.map((_, i) => i);
+    cvdChart.data.datasets[0].data = vals;
+    cvdChart.data.datasets[0].backgroundColor = (ctx) => {
+      const v = ctx.dataset.data[ctx.dataIndex] || 0;
+      return v >= 0 ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+    };
+    cvdChart.update('none');
+  }
+
+  // OI
+  if (oiChart && data.oi) {
+    const hist = data.oi.history || [];
+    oiChart.data.labels = hist.map((_, i) => i);
+    oiChart.data.datasets[0].data = hist;
+    oiChart.update('none');
+  }
+
+  // RSI gauge
+  if (data.rsi && data.rsi.value != null) {
+    drawRSIGauge('rsi-gauge-canvas', data.rsi.value);
+  }
+
+  // OBI gauge
+  if (data.obi && data.obi.value != null) {
+    drawOBIGauge('obi-gauge-canvas', data.obi.value);
+  }
+}
+
+// ── Update UI with indicator data ────────────────────────────────
+function updateUI(data) {
+  if (!data) return;
+
+  // Spots
+  if (data.spots) {
+    const sb = document.getElementById('spot-btc');
+    const se = document.getElementById('spot-eth');
+    if (sb && data.spots.btc) {
+      sb.textContent = '$' + formatNum(data.spots.btc, 2);
+      const t = document.getElementById('spot-btc-time');
+      if (t) t.textContent = fmtBJ(new Date());
+    }
+    if (se && data.spots.eth) {
+      se.textContent = '$' + formatNum(data.spots.eth, 2);
+      const t = document.getElementById('spot-eth-time');
+      if (t) t.textContent = fmtBJ(new Date());
+    }
+  }
+
+  // 1. RSI
+  if (data.rsi) {
+    const r = data.rsi;
+    const v = r.value;
+    document.getElementById('rsi-value').textContent = v != null ? Number(v).toFixed(1) : '--';
+    const card = document.getElementById('card-rsi');
+    const badge = document.getElementById('rsi-badge');
+    let zone = '--';
+    if (v > 70) { zone = '超买区'; badge.textContent = '超买'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else if (v < 30) { zone = '超卖区'; badge.textContent = '超卖'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (v >= 45 && v <= 55) { zone = '中性区'; badge.textContent = '中性'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+    else if (v > 55 && v <= 70) { zone = '偏多'; badge.textContent = '偏多'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else { zone = '偏空'; badge.textContent = '偏空'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    document.getElementById('rsi-zone').textContent = zone;
+  }
+
+  // 2. MACD
+  if (data.macd) {
+    const m = data.macd;
+    document.getElementById('macd-line').textContent = m.line != null ? Number(m.line).toFixed(5) : '--';
+    document.getElementById('macd-signal').textContent = m.signal != null ? Number(m.signal).toFixed(5) : '--';
+    const card = document.getElementById('card-macd');
+    const badge = document.getElementById('macd-badge');
+    const hist = m.histogram;
+    if (hist && hist.length > 0) {
+      const last = hist[hist.length - 1];
+      const prev = hist[hist.length - 2] || 0;
+      if (last > 0 && last > prev) { badge.textContent = '多头动能'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+      else if (last < 0 && last < prev) { badge.textContent = '空头动能'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+      else { badge.textContent = '收缩'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+    }
+  }
+
+  // 3. VWAP
+  if (data.vwap) {
+    const v = data.vwap;
+    document.getElementById('vwap-value').textContent = v.value != null ? formatNum(v.value, 2) : '--';
+    document.getElementById('vwap-relative').textContent = v.relative || '--';
+    const card = document.getElementById('card-vwap');
+    const badge = document.getElementById('vwap-badge');
+    if (v.signal === 'above') { badge.textContent = '价格>VWAP'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (v.signal === 'below') { badge.textContent = '价格<VWAP'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else { badge.textContent = '接近VWAP'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 4. EMA
+  if (data.ema) {
+    const e = data.ema;
+    document.getElementById('ema-9').textContent = e.ema9 != null ? formatNum(e.ema9, 2) : '--';
+    document.getElementById('ema-21').textContent = e.ema21 != null ? formatNum(e.ema21, 2) : '--';
+    const card = document.getElementById('card-ema');
+    const badge = document.getElementById('ema-badge');
+    if (e.cross === 'golden') { badge.textContent = '金叉'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (e.cross === 'death') { badge.textContent = '死叉'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else if (e.ema9 != null && e.ema21 != null && e.ema9 > e.ema21) { badge.textContent = '多头排列'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (e.ema9 != null && e.ema21 != null && e.ema9 < e.ema21) { badge.textContent = '空头排列'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else { badge.textContent = '数据不足'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 5. Pivot
+  if (data.pivot) {
+    const p = data.pivot;
+    document.getElementById('pivot-high').textContent = p.high != null ? formatNum(p.high, 2) : '--';
+    document.getElementById('pivot-mid').textContent = p.mid != null ? formatNum(p.mid, 2) : '--';
+    document.getElementById('pivot-low').textContent = p.low != null ? formatNum(p.low, 2) : '--';
+    document.getElementById('pivot-dist-high').textContent = p.distHigh || '--';
+    document.getElementById('pivot-dist-low').textContent = p.distLow || '--';
+    document.getElementById('pivot-dist-mid').textContent = p.distMid || '--';
+    const card = document.getElementById('card-pivot');
+    const badge = document.getElementById('pivot-badge');
+    if (p.signal === 'above') { badge.textContent = '突破阻力'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (p.signal === 'below') { badge.textContent = '跌破支撑'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else { badge.textContent = '区间内'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 6. Bollinger Bands
+  if (data.bbands) {
+    const b = data.bbands;
+    document.getElementById('bbands-upper').textContent = b.upper != null ? formatNum(b.upper, 2) : '--';
+    document.getElementById('bbands-mid').textContent = b.mid != null ? formatNum(b.mid, 2) : '--';
+    document.getElementById('bbands-lower').textContent = b.lower != null ? formatNum(b.lower, 2) : '--';
+    const card = document.getElementById('card-bbands');
+    const badge = document.getElementById('bbands-badge');
+    if (b.signal === 'upper_touch') { badge.textContent = '触及上轨'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else if (b.signal === 'lower_touch') { badge.textContent = '触及下轨'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else { badge.textContent = '通道内'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 7. Funding Rate
+  if (data.funding) {
+    const f = data.funding;
+    document.getElementById('funding-value').textContent = f.value != null ? (f.value > 0 ? '+' : '') + (f.value * 100).toFixed(3) + '%' : '--';
+    document.getElementById('funding-direction').textContent = f.direction || '--';
+    const needle = document.getElementById('fr-needle');
+    const zLong = document.getElementById('fr-zone-long');
+    const zShort = document.getElementById('fr-zone-short');
+    const card = document.getElementById('card-funding');
+    const badge = document.getElementById('funding-badge');
+    if (f.value != null) {
+      const pct = clamp(f.value * 100 / 0.1, -100, 100);
+      if (f.value > 0) {
+        needle.style.left = (50 + pct * 0.5) + '%';
+        zLong.style.width = (pct * 0.5) + '%';
+        zShort.style.width = '0%';
+      } else {
+        needle.style.left = (50 + pct * 0.5) + '%';
+        zShort.style.width = Math.abs(pct * 0.5) + '%';
+        zLong.style.width = '0%';
+      }
+    }
+    if (f.signal === 'bearish') { badge.textContent = '多头过度'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else if (f.signal === 'bullish') { badge.textContent = '空头过度'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else { badge.textContent = '中性'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 8. CVD
+  if (data.cvd) {
+    const c = data.cvd;
+    const el = document.getElementById('cvd-value');
+    const interp = document.getElementById('cvd-interpretation');
+    const card = document.getElementById('card-cvd');
+    const badge = document.getElementById('cvd-badge');
+    if (el) {
+      if (c.value > 0) { el.textContent = '+' + formatNum(c.value, 0); el.className = 'iv-value up'; }
+      else if (c.value < 0) { el.textContent = formatNum(c.value, 0); el.className = 'iv-value dn'; }
+      else { el.textContent = '0'; el.className = 'iv-value ne'; }
+    }
+    if (interp && card && badge) {
+      if (c.interpretation === 'accumulation') { interp.innerHTML = '蓄力 <strong style="color:#34d399">UP 预期</strong>'; badge.textContent = '蓄力UP'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+      else if (c.interpretation === 'distribution') { interp.innerHTML = '派发 <strong style="color:#f87171">DOWN 预期</strong>'; badge.textContent = '派发DOWN'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+      else { interp.textContent = '无明显信号'; badge.textContent = '中性'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+    }
+  }
+
+  // 9. Liquidation
+  if (data.liquidation) {
+    const l = data.liquidation;
+    document.getElementById('liq-long-pct').textContent = l.longPct != null ? (l.longPct * 100).toFixed(1) + '%' : '--';
+    document.getElementById('liq-short-pct').textContent = l.shortPct != null ? (l.shortPct * 100).toFixed(1) + '%' : '--';
+    document.getElementById('liq-long-dist').textContent = l.longDist != null ? (l.longDist > 0 ? '+' : '') + (l.longDist * 100).toFixed(2) + '%' : '--';
+    document.getElementById('liq-short-dist').textContent = l.shortDist != null ? (l.shortDist > 0 ? '+' : '') + (l.shortDist * 100).toFixed(2) + '%' : '--';
+    const lbLong = document.getElementById('liq-long-bar');
+    const lbShort = document.getElementById('liq-short-bar');
+    if (lbLong && l.longPct != null) lbLong.style.width = (l.longPct * 100) + '%';
+    if (lbShort && l.shortPct != null) lbShort.style.width = (l.shortPct * 100) + '%';
+    const card = document.getElementById('card-liq');
+    const badge = document.getElementById('liq-badge');
+    const dirEl = document.getElementById('liq-direction');
+    if (dirEl) {
+      dirEl.innerHTML = '多头清算集群: <span class="dn">' + (l.longDist != null ? (l.longDist > 0 ? '+' : '') + (l.longDist * 100).toFixed(2) + '%' : '--') + '</span> | 空头清算集群: <span class="up">' + (l.shortDist != null ? (l.shortDist > 0 ? '+' : '') + (l.shortDist * 100).toFixed(2) + '%' : '--') + '</span>';
+    }
+    if (l.signal === 'down_magnet') { badge.textContent = '下吸力'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else if (l.signal === 'up_magnet') { badge.textContent = '上吸力'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else { badge.textContent = '均衡'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 10. OBI
+  if (data.obi) {
+    const o = data.obi;
+    document.getElementById('obi-value').textContent = o.value != null ? Number(o.value).toFixed(3) : '--';
+    const obiEl = document.getElementById('obi-value');
+    if (o.value > 1.5) { obiEl.className = 'obi-value-lg up'; }
+    else if (o.value < 0.67) { obiEl.className = 'obi-value-lg dn'; }
+    else { obiEl.className = 'obi-value-lg'; }
+    const interpEl = document.getElementById('obi-interpretation');
+    if (interpEl) {
+      if (o.interpretation === 'bid_heavy') { interpEl.innerHTML = '<span class="up">买盘主导</span>'; }
+      else if (o.interpretation === 'ask_heavy') { interpEl.innerHTML = '<span class="dn">卖盘主导</span>'; }
+      else { interpEl.textContent = '均衡'; }
+    }
+    document.getElementById('obi-bids').textContent = o.bidVol != null ? formatNum(o.bidVol, 2) : '--';
+    document.getElementById('obi-asks').textContent = o.askVol != null ? formatNum(o.askVol, 2) : '--';
+    const card = document.getElementById('card-obi');
+    const badge = document.getElementById('obi-badge');
+    if (o.signal === 'up') { badge.textContent = '买盘主导'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+    else if (o.signal === 'down') { badge.textContent = '卖盘主导'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+    else { badge.textContent = '均衡'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+  }
+
+  // 10. OI
+  if (data.oi) {
+    const o = data.oi;
+    document.getElementById('oi-current').textContent = o.current != null ? '$' + formatNum(o.current, 0) : '--';
+    const changeEl = document.getElementById('oi-change');
+    const interpEl = document.getElementById('oi-interpretation');
+    const card = document.getElementById('card-oi');
+    const badge = document.getElementById('oi-badge');
+    if (changeEl) {
+      if (o.change != null) {
+        const ch = o.change;
+        changeEl.textContent = (ch > 0 ? '+' : '') + (ch * 100).toFixed(1) + '%';
+        changeEl.className = 'oi-change ' + (ch > 0 ? 'up' : 'dn');
+      }
+    }
+    if (interpEl) {
+      if (o.interpretation === 'new_long_fuel') { interpEl.innerHTML = '新多入场 <strong style="color:#34d399">趋势延续</strong>'; badge.textContent = '多头燃料'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+      else if (o.interpretation === 'short_squeeze') { interpEl.innerHTML = '空头平仓 <strong style="color:#f87171">反转预警</strong>'; badge.textContent = '空头平仓'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+      else if (o.interpretation === 'new_short_fuel') { interpEl.innerHTML = '新空入场 <strong style="color:#f87171">趋势延续</strong>'; badge.textContent = '空头燃料'; badge.className = 'ind-badge bear'; card.className = 'ind-card bearish'; }
+      else if (o.interpretation === 'long_capitulation') { interpEl.innerHTML = '多头投降 <strong style="color:#34d399">反弹预期</strong>'; badge.textContent = '多头投降'; badge.className = 'ind-badge bull'; card.className = 'ind-card bullish'; }
+      else { interpEl.textContent = '无明显信号'; badge.textContent = '中性'; badge.className = 'ind-badge flat'; card.className = 'ind-card neutral'; }
+    }
+  }
+
+  // Consensus
+  updateConsensus(data);
+}
+
+function updateConsensus(data) {
+  const signals = [];
+
+  if (data.rsi && data.rsi.value != null) {
+    const v = data.rsi.value;
+    if (v > 70) signals.push({ name: 'RSI', dir: 'DOWN', agree: false });
+    else if (v < 30) signals.push({ name: 'RSI', dir: 'UP', agree: true });
+    else if (v >= 45 && v <= 55) signals.push({ name: 'RSI', dir: 'SKIP', agree: false });
+    else if (v > 55) signals.push({ name: 'RSI', dir: 'UP', agree: true });
+    else signals.push({ name: 'RSI', dir: 'DOWN', agree: true });
+  }
+
+  if (data.macd && data.macd.histogram && data.macd.histogram.length > 0) {
+    const last = data.macd.histogram[data.macd.histogram.length - 1];
+    const prev = data.macd.histogram[data.macd.histogram.length - 2] || 0;
+    if (last > 0 && last > prev) signals.push({ name: 'MACD', dir: 'UP', agree: true });
+    else if (last < 0 && last < prev) signals.push({ name: 'MACD', dir: 'DOWN', agree: true });
+    else signals.push({ name: 'MACD', dir: 'SKIP', agree: false });
+  }
+
+  if (data.vwap && data.vwap.signal) {
+    signals.push({ name: 'VWAP', dir: data.vwap.signal === 'above' ? 'UP' : data.vwap.signal === 'below' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.ema && data.ema.cross) {
+    signals.push({ name: 'EMA', dir: data.ema.cross === 'golden' ? 'UP' : data.ema.cross === 'death' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.pivot && data.pivot.signal) {
+    signals.push({ name: 'Pivot', dir: data.pivot.signal === 'above' ? 'UP' : data.pivot.signal === 'below' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.funding && data.funding.signal) {
+    signals.push({ name: 'Funding', dir: data.funding.signal === 'bullish' ? 'UP' : data.funding.signal === 'bearish' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.cvd && data.cvd.interpretation) {
+    signals.push({ name: 'CVD', dir: data.cvd.interpretation === 'accumulation' ? 'UP' : data.cvd.interpretation === 'distribution' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.liquidation && data.liquidation.signal) {
+    signals.push({ name: 'Liq', dir: data.liquidation.signal === 'up_magnet' ? 'UP' : data.liquidation.signal === 'down_magnet' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.obi && data.obi.signal) {
+    signals.push({ name: 'OBI', dir: data.obi.signal === 'up' ? 'UP' : data.obi.signal === 'down' ? 'DOWN' : 'SKIP', agree: true });
+  }
+
+  if (data.oi && data.oi.interpretation) {
+    const map = { 'new_long_fuel': 'UP', 'short_squeeze': 'UP', 'new_short_fuel': 'DOWN', 'long_capitulation': 'UP' };
+    if (map[data.oi.interpretation]) signals.push({ name: 'OI', dir: map[data.oi.interpretation], agree: true });
+    else signals.push({ name: 'OI', dir: 'SKIP', agree: false });
+  }
+
+  const agreeUp = signals.filter(s => s.dir === 'UP').length;
+  const agreeDown = signals.filter(s => s.dir === 'DOWN').length;
+  const total = agreeUp + agreeDown;
+
+  // Sentiment bar
+  const sbUp = document.getElementById('sb-up');
+  const sbDown = document.getElementById('sb-down');
+  if (sbUp && sbDown) {
+    if (total > 0) {
+      sbUp.style.width = (agreeUp / total * 100) + '%';
+      sbDown.style.width = (agreeDown / total * 100) + '%';
+    }
+    document.getElementById('agree-up-count').textContent = agreeUp;
+    document.getElementById('agree-down-count').textContent = agreeDown;
+  }
+
+  // Conf chips
+  const chipsEl = document.getElementById('conf-chips');
+  if (chipsEl) {
+    chipsEl.innerHTML = signals.map(s => {
+      const cls = s.dir === 'UP' ? 'agree' : s.dir === 'DOWN' ? 'disagree' : 'skip';
+      const arrow = s.dir === 'UP' ? '⬆' : s.dir === 'DOWN' ? '⬇' : '—';
+      return `<span class="conf-chip ${cls}">${arrow} ${s.name}</span>`;
+    }).join('');
+  }
+
+  // Score
+  const scoreEl = document.getElementById('conf-score');
+  if (scoreEl) {
+    const coreUp = signals.filter(s => ['RSI', 'MACD', 'VWAP', 'EMA', 'Pivot', 'BBands'].includes(s.name) && s.dir === 'UP').length;
+    const coreDown = signals.filter(s => ['RSI', 'MACD', 'VWAP', 'EMA', 'Pivot', 'BBands'].includes(s.name) && s.dir === 'DOWN').length;
+    const coreMax = Math.max(coreUp, coreDown);
+    const score = coreMax;
+    if (score >= 4) { scoreEl.textContent = score + '/6'; scoreEl.className = 'conf-score strong-up'; }
+    else if (score === 3) { scoreEl.textContent = score + '/6'; scoreEl.className = 'conf-score weak-up'; }
+    else if (score === 2) { scoreEl.textContent = score + '/6'; scoreEl.className = 'conf-score neutral'; }
+    else { scoreEl.textContent = score + '/6'; scoreEl.className = 'conf-score neutral'; }
+  }
+
+  // Fill
+  const fillEl = document.getElementById('conf-fill');
+  if (fillEl) {
+    const coreUp = signals.filter(s => ['RSI', 'MACD', 'VWAP', 'EMA', 'Pivot', 'BBands'].includes(s.name) && s.dir === 'UP').length;
+    const coreDown = signals.filter(s => ['RSI', 'MACD', 'VWAP', 'EMA', 'Pivot', 'BBands'].includes(s.name) && s.dir === 'DOWN').length;
+    const coreMax = Math.max(coreUp, coreDown);
+    fillEl.style.width = (coreMax / 6 * 100) + '%';
+    fillEl.style.background = coreUp > coreDown
+      ? 'linear-gradient(90deg, #059669, #10b981)'
+      : coreDown > coreUp
+        ? 'linear-gradient(90deg, #dc2626, #ef4444)'
+        : 'linear-gradient(90deg, #7c3aed, #a78bfa)';
+  }
+}
+
+// ── Asset selector ──────────────────────────────────────────────
+function selectAsset(asset) {
+  currentAsset = asset;
+  document.getElementById('btn-btc').className = 'asset-btn' + (asset === 'BTC' ? ' active' : '');
+  document.getElementById('btn-eth').className = 'asset-btn' + (asset === 'ETH' ? ' active' : '');
+  // 通知 WS 切换资产
+  if (wsInd && wsInd.readyState === WebSocket.OPEN) {
+    wsInd.send(JSON.stringify({ asset: asset }));
+  }
+  fetchSignal();
+}
+
+// ── WebSocket ───────────────────────────────────────────────────
+function setWsStatus() {
+  const dot = document.getElementById('ws-dot');
+  const label = document.getElementById('ws-label');
+  if (dot) dot.className = 'live-dot' + (wsOnline ? '' : ' offline');
+  if (label) label.textContent = wsOnline ? '实时' : '离线 (重连中)';
+}
+
+async function fetchIndicators() {
+  const d = await api('/api/indicators?asset=' + currentAsset);
+  if (!d) return;
+  indicators = d;
+  updateUI(d);
+  updateCharts(d);
+  const lu = document.getElementById('last-updated');
+  if (lu) lu.textContent = '最后更新: ' + fmtBJ(new Date());
+}
+
+// ── 实时指标 WS（替代轮询）────────────────────────────────────────
+function connectWsIndicators() {
+  if (wsInd) { wsInd.onclose = null; wsInd.onerror = null; try { wsInd.close(); } catch (_) {} wsInd = null; }
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  wsInd = new WebSocket(proto + '//' + location.host + '/ws/indicators');
+
+  wsInd.onopen = () => {
+    wsIndRetryDelay = 2000;
+    // 发送当前资产
+    wsInd.send(JSON.stringify({ asset: currentAsset }));
+  };
+
+  wsInd.onmessage = ev => {
+    try {
+      const d = JSON.parse(ev.data);
+      if (!d || d._type !== 'indicators') return;
+      indicators = d;
+      updateUI(d);
+      updateCharts(d);
+      const lu = document.getElementById('last-updated');
+      if (lu) lu.textContent = '最后更新: ' + fmtBJ(new Date());
+    } catch (_) {}
+  };
+
+  wsInd.onclose = () => {
+    retryTimer = setTimeout(connectWsIndicators, wsIndRetryDelay);
+    wsIndRetryDelay = Math.min(wsIndRetryDelay * 2, 30000);
+  };
+
+  wsInd.onerror = () => { wsInd.close(); };
+}
+
+function connectWS() {
+  if (ws) { ws.onclose = null; ws.onerror = null; try { ws.close(); } catch (_) {} ws = null; }
+  wsOnline = false;
+  setWsStatus();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // 只保留现货价 WS（已在 /ws/indicators 中处理）
+  ws = new WebSocket(proto + '//' + location.host + '/ws/prices');
+
+  ws.onopen = () => {
+    wsOnline = true;
+    retryDelay = 2000;
+    setWsStatus();
+  };
+
+  ws.onmessage = ev => {
+    try {
+      const msg = JSON.parse(ev.data);
+      // ── Binance spot prices ──────────────────────────
+      if (msg.spots) {
+        const s = msg.spots;
+        const sb = document.getElementById('spot-btc');
+        const se = document.getElementById('spot-eth');
+        if (sb && s.btc) {
+          sb.textContent = '$' + formatNum(s.btc, 2);
+          const t = document.getElementById('spot-btc-time');
+          if (t) t.textContent = fmtBJ(new Date());
+        }
+        if (se && s.eth) {
+          se.textContent = '$' + formatNum(s.eth, 2);
+          const t = document.getElementById('spot-eth-time');
+          if (t) t.textContent = fmtBJ(new Date());
+        }
+      }
+    } catch (_) { /* ignore malformed WS messages */ }
+
+    const lu = document.getElementById('last-updated');
+    if (lu) lu.textContent = '最后更新: ' + fmtBJ(new Date());
+  };
+
+  ws.onclose = () => {
+    wsOnline = false;
+    setWsStatus();
+    retryTimer = setTimeout(connectWS, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 30000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+}
+
+// ── Auth check ─────────────────────────────────────────────────
+async function checkAuth() {
+  const d = await api('/api/auth/me');
+  if (!d) return;
+}
+
+// ── Signal recommendation ─────────────────────────────────────
+function drawStrengthRing(value) {
+  const canvas = document.getElementById('strength-ring-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = 128;
+  const h = canvas.height = 128;
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2;
+  const r = Math.min(w, h) / 2 - 6;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = '#1e1e3a';
+  ctx.lineWidth = 8;
+  ctx.stroke();
+  if (value != null && value >= 0) {
+    const ratio = Math.min(value / 5, 1);
+    const colors = ['#6b7280', '#9ca3af', '#fbbf24', '#34d399', '#10b981', '#059669'];
+    const color = colors[Math.min(Math.round(value), 5)];
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + ratio * Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+function updateSignalUI(data) {
+  if (!data) return;
+  signalData = data;
+  const panel = document.getElementById('signal-panel');
+  if (panel) panel.style.display = 'block';
+  const numEl = document.getElementById('strength-num');
+  if (numEl) numEl.textContent = data.strength || '--';
+  const colors = ['#6b7280', '#9ca3af', '#fbbf24', '#34d399', '#10b981', '#059669'];
+  const color = colors[Math.min(data.strength || 0, 5)];
+  if (numEl) numEl.style.color = color;
+  drawStrengthRing(data.strength);
+  const actionEl = document.getElementById('action-main');
+  if (actionEl) {
+    actionEl.textContent = data.action_label || '--';
+    actionEl.className = 'action-main ' + (data.suggested_action || 'skip');
+  }
+  const dirEl = document.getElementById('action-direction');
+  if (dirEl) {
+    dirEl.textContent = data.direction_label || '--';
+    dirEl.className = 'action-direction ' + (data.direction === 'UP' ? 'up' : data.direction === 'DOWN' ? 'dn' : '');
+  }
+  const posEl = document.getElementById('action-pos');
+  if (posEl) {
+    const pct = Math.round((data.suggested_position_pct || 0) * 100);
+    posEl.textContent = pct > 0 ? '建议仓位：' + pct + '%' : '建议仓位：跳过';
+  }
+  const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  setText('sig-core', (data.core_agree || '--') + '/6');
+  setText('sig-tp', (data.dynamic_tp_pct || '--') + '%');
+  setText('sig-sl', (data.dynamic_sl_pct || '--') + '%');
+  const anchor = data.anchor_deviation_pct;
+  setText('sig-anchor', (anchor != null ? (anchor > 0 ? '+' : '') + anchor.toFixed(2) : '--') + '%');
+  const upM = data.up_mid, dnM = data.down_mid;
+  setText('sig-price', (upM != null ? upM.toFixed(4) : '--') + ' / ' + (dnM != null ? dnM.toFixed(4) : '--'));
+  const elapsed = data.elapsed_sec || 0;
+  const remaining = data.window_remaining_sec || 0;
+  setText('sig-elapsed', '已过 ' + Math.floor(elapsed / 60) + 'm ' + Math.floor(elapsed % 60) + 's');
+  setText('sig-remaining', '剩余 ' + Math.floor(remaining / 60) + 'm ' + Math.floor(remaining % 60) + 's');
+  const fill = document.getElementById('time-bar-fill');
+  if (fill) {
+    const progress = Math.min(elapsed / 900, 1);
+    fill.style.width = (progress * 100) + '%';
+    fill.style.background = progress < 0.2 ? '#059669' : progress < 0.8 ? '#d97706' : '#ef4444';
+  }
+  const zoneLabel = document.getElementById('time-zone-label');
+  if (zoneLabel) {
+    let text, col;
+    if (elapsed < 180) { text = '噪音期 T<3min'; col = '#6b7280'; }
+    else if (elapsed < 420) { text = '★ 最佳窗口 T=3~7min'; col = '#10b981'; }
+    else if (elapsed < 720) { text = '过渡期 T=7~12min'; col = '#d97706'; }
+    else { text = '危险期 T>12min'; col = '#ef4444'; }
+    zoneLabel.textContent = text;
+    zoneLabel.style.color = col;
+  }
+  // Core chips
+  const coreChips = document.getElementById('sig-core-chips');
+  if (coreChips && data.core_signals) {
+    coreChips.innerHTML = data.core_signals.map(s => {
+      const cls = s.direction === 'UP' ? 'up' : s.direction === 'DOWN' ? 'dn' : 'skip';
+      const arrow = s.direction === 'UP' ? '↑' : s.direction === 'DOWN' ? '↓' : '—';
+      return '<span class="sig-ind-chip ' + cls + '">' + arrow + ' ' + s.name + '</span>';
+    }).join('');
+  }
+  // Advanced chips
+  const advChips = document.getElementById('sig-adv-chips');
+  if (advChips && data.advanced_signals) {
+    advChips.innerHTML = data.advanced_signals.map(s => {
+      const cls = s.direction === 'UP' ? 'up' : s.direction === 'DOWN' ? 'dn' : 'skip';
+      const arrow = s.direction === 'UP' ? '↑' : s.direction === 'DOWN' ? '↓' : '—';
+      return '<span class="sig-ind-chip ' + cls + '">' + arrow + ' ' + s.name + '</span>';
+    }).join('');
+  }
+  // Filter alert
+  const alertEl = document.getElementById('filter-alert');
+  if (alertEl && data.advanced_filter) {
+    if (data.advanced_filter === 'skip') {
+      alertEl.className = 'filter-alert skip-alert show';
+      alertEl.textContent = '⚠️ ' + (data.skip_reason || data.advanced_note || 'CVD背离，强制跳过');
+    } else if (data.advanced_filter === 'confirm') {
+      alertEl.className = 'filter-alert confirm-alert show';
+      alertEl.textContent = '✓ ' + (data.advanced_note || 'Advanced 确认，建议加仓');
+    } else if (data.advanced_filter === 'reduce') {
+      alertEl.className = 'filter-alert reduce-alert show';
+      alertEl.textContent = '⚡ ' + (data.advanced_note || '建议减仓');
+    } else {
+      alertEl.className = 'filter-alert';
+    }
+  }
+}
+
+async function fetchSignal() {
+  const d = await api('/api/signal?asset=' + currentAsset);
+  if (!d) return;
+  updateSignalUI(d);
+  if (d.raw_indicators) {
+    indicators = d.raw_indicators;
+    updateUI(d.raw_indicators);
+    updateCharts(d.raw_indicators);
+  }
+  const lu = document.getElementById('last-updated');
+  if (lu) lu.textContent = '最后更新: ' + fmtBJ(new Date());
+}
+
+// ── Init ────────────────────────────────────────────────────────
+initCharts();
+checkAuth();
+fetchSignal();
+connectWS();
+connectWsIndicators();  // 实时推送替代轮询
+setInterval(fetchSignal, 10000);
+</script>
+</body>
+</html>

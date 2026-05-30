@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交易记录 - Polymarket</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a14; color: #e0e0e0; }
+  nav { background: #12122a; border-bottom: 1px solid #1e1e3a; padding: 0 24px; display: flex; align-items: center; gap: 8px; height: 56px; }
+  nav a { color: #a0a0b0; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
+  nav a:hover, nav a.active { background: #1e1e3a; color: #a78bfa; }
+  nav .brand { font-weight: 700; font-size: 16px; color: #7c3aed; margin-right: 16px; }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .nav-user { display: flex; align-items: center; gap: 8px; }
+  .nav-user-info { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 6px; }
+  .nav-user-info .user-icon { font-size: 14px; }
+  .nav-user-info .username { color: #a0a0b0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .logout-btn { font-size: 12px; color: #6b7280; background: none; border: 1px solid #2a2a4a; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+  .logout-btn:hover { color: #ef4444; border-color: #7f1d1d; background: #1e0e0e; }
+  .container { max-width: 1300px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; }
+  .filter-bar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
+  .filter-bar label { font-size: 13px; color: #6b7280; }
+  .filter-bar select { padding: 6px 10px; background: #12122a; border: 1px solid #2a2a4a; border-radius: 6px; color: #e0e0e0; font-size: 13px; }
+  .card { background: #12122a; border: 1px solid #1e1e3a; border-radius: 10px; padding: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; color: #6b7280; border-bottom: 1px solid #1e1e3a; white-space: nowrap; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e1e3a; white-space: nowrap; }
+  tr:hover td { background: #1a1a2e; }
+  tr:last-child td { border-bottom: none; }
+
+  /* ── 行类型区分 ── */
+  tr.row-first td { background: #0f1a2a; }
+  tr.row-addon td { background: #141420; }
+  tr.row-first:hover td { background: #142030; }
+  tr.row-addon:hover td { background: #1a1a2e; }
+
+  /* 行号图标 */
+  .fill-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; font-size: 11px; font-weight: 700; }
+  .fill-num.first { background: #1e3a5f; color: #60a5fa; border: 1px solid #2a4a7f; }
+  .fill-num.addon { background: #2a1a4a; color: #a78bfa; border: 1px solid #4a2a7f; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.UP { background: #064e3b; color: #34d399; }
+  .badge.DOWN { background: #450a0a; color: #f87171; }
+  .badge-mode { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-mode.live { background: #450a0a; color: #f87171; }
+  .badge-mode.dry { background: #1e3a5f; color: #60a5fa; }
+  .badge-reason { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-reason.tp { background: #064e3b; color: #34d399; }
+  .badge-reason.sl { background: #450a0a; color: #f87171; }
+  .badge-reason.settled { background: #1e3a5f; color: #60a5fa; }
+  .badge-reason.unknown { background: #2a2a4a; color: #9ca3af; }
+  .badge-reason.closed { background: #064e3b; color: #34d399; }
+
+  .col-fill-num { width: 40px; text-align: center; }
+  .col-direction { width: 60px; }
+  .col-price { width: 80px; text-align: right; }
+  .col-cost { width: 80px; text-align: right; }
+  .col-vwap { width: 80px; text-align: right; }
+  .col-mid { width: 80px; text-align: right; }
+  .col-mode { width: 60px; }
+  .col-reason { width: 90px; }
+  .col-fee { width: 70px; text-align: right; }
+
+  .cost-cumulative { color: #6b7280; font-size: 11px; }
+
+  .pagination { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
+  .pagination button { padding: 6px 12px; background: #1e1e3a; border: 1px solid #2a2a4a; color: #a0a0b0; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .pagination button:hover { background: #2a2a4a; }
+  .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagination .page-info { font-size: 13px; color: #6b7280; margin-left: auto; }
+  .no-data { text-align: center; color: #6b7280; padding: 30px; }
+  .refresh-btn { background: none; border: 1px solid #2a2a4a; color: #a0a0b0; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-left: auto; }
+  .refresh-btn:hover { background: #1e1e3a; }
+  .header-row { display: flex; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+  .legend { display: flex; gap: 16px; align-items: center; font-size: 12px; color: #6b7280; margin-left: 16px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-dot.first { background: #60a5fa; }
+  .legend-dot.addon { background: #a78bfa; }
+  .col-pnl { width: 80px; text-align: right; }
+  .pnl-pos { color: #10b981; }
+  .pnl-neg { color: #ef4444; }
+  .closed-row td { border-bottom: 2px solid #2a2a4a !important; }
+
+  /* ── 折叠展开 ── */
+  .trade-group { }
+  .trade-parent { cursor: pointer; user-select: none; }
+  .trade-parent:hover td { background: #142030 !important; }
+  .trade-parent td:first-child::before {
+    content: '▶';
+    font-size: 10px;
+    color: #6b7280;
+    margin-right: 4px;
+    transition: transform 0.15s;
+  }
+  .trade-parent.expanded td:first-child::before {
+    content: '▼';
+  }
+  .trade-addon-rows { display: none; }
+  .trade-addon-rows.open { display: table-row; }
+  .trade-addon-rows.open + tr td { border-top: none !important; }
+  tr.trade-addon-row td { background: #141420 !important; }
+  tr.trade-addon-row:hover td { background: #1a1a2e !important; }
+  tr.trade-addon-row td:first-child { padding-left: 44px; }
+  .addon-spacer td {
+    background: transparent !important;
+    height: 2px !important;
+    padding: 0 !important;
+    border: none !important;
+  }
+  .addon-spacer.open { display: table-row; }
+
+  /* ── Mobile Responsive ── */
+  @media (max-width: 768px) {
+    nav { padding: 0 12px; gap: 4px; }
+    nav a { padding: 6px 10px; font-size: 13px; }
+    nav .brand { margin-right: 8px; font-size: 15px; }
+    .container { padding: 16px; }
+    h1 { font-size: 18px; margin-bottom: 16px; }
+    .filter-bar { gap: 8px; }
+    .filter-bar label { font-size: 12px; }
+    .filter-bar select { font-size: 12px; padding: 5px 8px; }
+    .card { padding: 16px; }
+    table { font-size: 12px; }
+    th, td { padding: 8px 8px; }
+    .header-row { margin-bottom: 12px; }
+    .refresh-btn { font-size: 12px; padding: 5px 10px; }
+    .pagination { flex-wrap: wrap; justify-content: center; }
+    .pagination .page-info { margin-left: 0; width: 100%; text-align: center; margin-top: 4px; }
+    .legend { margin-left: 0; flex-wrap: wrap; gap: 8px; }
+  }
+
+  @media (max-width: 540px) {
+    nav { height: 50px; }
+    nav a:not(.brand) { padding: 5px 8px; font-size: 12px; }
+    .container { padding: 12px; }
+    .filter-bar select { min-width: 80px; }
+  }
+
+  @media (max-width: 480px) {
+    nav { gap: 2px; }
+    nav a:not(.brand) { padding: 5px 6px; font-size: 12px; border-radius: 4px; }
+    .filter-bar { gap: 6px; }
+    table { font-size: 11px; }
+    th, td { padding: 6px 5px; }
+  }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">Polymarket</span>
+  <a href="/">控制台</a>
+  <a href="/trades" class="active">交易记录</a>
+  <a href="/indicators">指标面板</a>
+  <a href="/config">配置</a>
+  <div class="nav-right">
+    <div class="nav-user">
+      <div class="nav-user-info" id="nav-user-info" style="display:none">
+        <span class="user-icon">&#128100;</span>
+        <span class="username" id="nav-username"></span>
+      </div>
+      <button class="logout-btn" id="nav-logout-btn" style="display:none" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+</nav>
+<div class="container">
+  <div class="header-row">
+    <h1>交易记录</h1>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot first"></div>首单</div>
+      <div class="legend-item"><div class="legend-dot addon"></div>补仓</div>
+    </div>
+    <button class="refresh-btn" onclick="loadTrades()">刷新</button>
+  </div>
+
+  <div class="filter-bar">
+    <label>品种</label>
+    <select id="filter-asset" onchange="loadTrades()">
+      <option value="">全部</option>
+      <option value="BTC">BTC</option>
+      <option value="ETH">ETH</option>
+    </select>
+    <label>方向</label>
+    <select id="filter-side" onchange="loadTrades()">
+      <option value="">全部</option>
+      <option value="UP">UP</option>
+      <option value="DOWN">DOWN</option>
+    </select>
+    <label>模式</label>
+    <select id="filter-mode" onchange="loadTrades()">
+      <option value="">全部</option>
+      <option value="live">实盘</option>
+      <option value="dry">干跑</option>
+    </select>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th class="col-fill-num">#</th>
+        <th>买入时间</th>
+        <th>卖出时间</th>
+        <th>品种</th>
+        <th>方向</th>
+        <th class="col-mode">模式</th>
+        <th class="col-price">买入均价</th>
+        <th class="col-price">卖出均价</th>
+        <th class="col-cost">成交金额</th>
+        <th class="col-fee">手续费</th>
+        <th class="col-vwap">累计均价</th>
+        <th class="col-cost">累计投入</th>
+        <th class="col-pnl">PnL %</th>
+        <th class="col-pnl">PnL $</th>
+        <th class="col-reason">状态</th>
+      </tr></thead>
+      <tbody id="tbody"><tr><td colspan="15" class="no-data">加载中...</td></tr></tbody>
+    </table>
+    <div class="pagination">
+      <button onclick="changePage(-1)" id="btn-prev">上一页</button>
+      <button onclick="changePage(1)" id="btn-next">下一页</button>
+      <span class="page-info" id="page-info"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('pm_token') || '';
+let page = 1;
+let _authChecked = false;
+
+async function api(path) {
+  const r = await fetch(API + path, { headers: { 'Authorization': 'Bearer ' + token } });
+  if (r.status === 401) { window.location.href = '/login'; return null; }
+  return r.json();
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  _authChecked = false;
+  const d = await api('/api/auth/me');
+  const userInfo = document.getElementById('nav-user-info');
+  const logoutBtn = document.getElementById('nav-logout-btn');
+  if (d) {
+    const name = d.username || '用户';
+    if (userInfo) {
+      userInfo.style.display = 'flex';
+      const nameEl = document.getElementById('nav-username');
+      if (nameEl) nameEl.textContent = name + (d.is_admin ? ' (管理员)' : '');
+    }
+    if (logoutBtn) logoutBtn.style.display = 'block';
+    _authChecked = true;
+    loadTrades();
+  } else {
+    if (userInfo) userInfo.style.display = 'none';
+    if (logoutBtn) logoutBtn.style.display = 'none';
+  }
+}
+
+async function doLogout() {
+  if (!confirm('确定要退出登录吗？')) return;
+  await fetch(API + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+  });
+  localStorage.removeItem('pm_token');
+  window.location.href = '/login';
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function fmtBJStr(s) {
+  if (!s) return '--';
+  return new Date(s.endsWith('Z') ? s : s + 'Z').toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Shanghai' });
+}
+
+function reasonBadgeCN(reason, closed) {
+  if (closed) return '<span class="badge-reason closed" title="已平仓">已平仓</span>';
+  if (!reason) return '<span class="badge-reason unknown">--</span>';
+  const r = reason.toLowerCase();
+
+  if (r.startsWith('martingale_tp')) return '<span class="badge-reason tp" title="马丁止盈">马丁止盈</span>';
+  if (r.includes('giveup')) {
+    return '<span class="badge-reason sl" title="' + reason + '">卖出失败</span>';
+  }
+  if (r.includes('_phase')) return '<span class="badge-reason tp" title="' + reason + '">旧版阶段性（历史）</span>';
+  if (r.startsWith('tp')) return '<span class="badge-reason tp" title="止盈平仓">止盈平仓</span>';
+  if (r.startsWith('sl')) return '<span class="badge-reason sl" title="止损平仓">止损平仓</span>';
+  if (r.includes('gamma') || r.includes('resolved')) return '<span class="badge-reason settled" title="市场结算">市场结算</span>';
+  if (r.includes('settle_timeout') || r.includes('proxy')) return '<span class="badge-reason settled" title="结算超时兜底">结算兜底</span>';
+  if (r.includes('末段止损')) return '<span class="badge-reason sl" title="末段止损">末段止损</span>';
+  return '<span class="badge-reason unknown" title="' + reason + '">' + reason + '</span>';
+}
+
+function modeBadge(mode) {
+  const isLive = mode === 'live';
+  return '<span class="badge-mode ' + (isLive ? 'live' : 'dry') + '">' + (isLive ? '实盘' : '干跑') + '</span>';
+}
+
+const sideMap = { UP: 'UP', DOWN: 'DOWN' };
+
+// ── Main ──────────────────────────────────────────────────────────────────
+let _expandedTrades = new Set();
+
+async function loadTrades() {
+  const asset = document.getElementById('filter-asset').value;
+  const side = document.getElementById('filter-side').value;
+  const mode = document.getElementById('filter-mode').value;
+  let url = '/api/trades?limit=15&page=' + page;
+  if (asset) url += '&asset=' + asset;
+  if (side) url += '&side=' + side;
+  if (mode) url += '&mode=' + mode;
+
+  const d = await api(url);
+  if (!d || !d.trades) return;
+  const tbody = document.getElementById('tbody');
+
+  if (d.trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="15" class="no-data">暂无记录</td></tr>';
+  } else {
+    let html = '';
+    for (const t of d.trades) {
+      const fillList = t.fill_list || [];
+      if (fillList.length === 0) continue;
+
+      const cumCost = fillList.reduce((s, f) => s + f.cost_usdc, 0);
+      const isExpanded = _expandedTrades.has(t.id);
+      const firstFill = fillList[0];
+      const lastFill = fillList[fillList.length - 1];
+      const hasMultiple = fillList.length > 1;
+
+      const expandAttr = hasMultiple
+        ? `data-id="${t.id}" onclick="toggleTrade(this)"`
+        : '';
+
+      // ── 首行 ───────────────────────────────────────────────────────────────
+      html += `<tr class="trade-parent${isExpanded ? ' expanded' : ''}"${expandAttr}>
+        <td class="col-fill-num">
+          ${hasMultiple
+            ? `<span class="fill-num first" title="点击展开/折叠 ${fillList.length} 笔成交">首</span>`
+            : `<span class="fill-num first" title="首单">首</span>`}
+        </td>
+        <td>${fmtBJStr(firstFill.created_at)}</td>
+        <td>${t.closed_at && t.closed_at !== '' ? fmtBJStr(t.closed_at) : '<span style="color:#6b7280">--</span>'}</td>
+        <td>${t.asset}</td>
+        <td><span class="badge ${t.side}">${sideMap[t.side] || t.side}</span></td>
+        <td>${modeBadge(firstFill.mode || t.mode)}</td>
+        <td class="col-price">${Number(lastFill.vwap_after).toFixed(4)}</td>
+        <td class="col-price">${t.exit_price != null ? Number(t.exit_price).toFixed(4) : '--'}</td>
+        <td class="col-cost">${Number(cumCost).toFixed(2)}</td>
+        <td class="col-fee">${fillList.reduce((s, f) => s + (f.fee_usdc || 0), 0).toFixed(4)}</td>
+        <td class="col-vwap">${Number(lastFill.vwap_after).toFixed(4)}</td>
+        <td class="col-cost">${Number(cumCost).toFixed(2)}</td>
+        <td class="col-pnl">
+          <span class="${t.pnl_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${t.pnl_pct != null ? Number(t.pnl_pct).toFixed(2) + '%' : '--'}</span>
+        </td>
+        <td class="col-pnl">
+          <span class="${t.pnl_usd >= 0 ? 'pnl-pos' : 'pnl-neg'}">${
+            t.pnl_usd != null && t.pnl_usd !== 0
+              ? Number(t.pnl_usd).toFixed(2)
+              : ((t.pnl_pct != null && t.bet_usdc != null)
+                  ? (Number(t.pnl_pct) >= 0 ? '+' : '') + (Number(t.pnl_pct) * Number(t.bet_usdc) / 100).toFixed(2)
+                  : '--')
+          }</span>
+        </td>
+        <td class="col-reason">${reasonBadgeCN(t.close_reason, !!(t.closed_at && t.closed_at !== ''))}</td>
+      </tr>`;
+
+      // ── 补仓展开行 ─────────────────────────────────────────────────────────
+      if (hasMultiple) {
+        for (let i = 1; i < fillList.length; i++) {
+          const f = fillList[i];
+          // 累计投入 = 0..i 所有 fill 的 cost_usdc 之和（当前笔为止的累计成本）
+          const cumCost = fillList.slice(0, i + 1).reduce((s, x) => s + (x.cost_usdc || 0), 0);
+          html += `<tr class="trade-addon-row${isExpanded ? ' trade-addon-rows open' : ' trade-addon-rows'}" data-parent="${t.id}">
+            <td class="col-fill-num"><span class="fill-num addon" title="补仓第${i}次">${i}</span></td>
+            <td>${fmtBJStr(f.created_at)}</td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="col-mode">${modeBadge(f.mode || t.mode)}</td>
+            <td class="col-price">${Number(f.fill_price).toFixed(4)}</td>
+            <td class="col-price"></td>
+            <td class="col-cost">${Number(f.cost_usdc).toFixed(2)}</td>
+            <td class="col-fee">${f.fee_usdc != null ? Number(f.fee_usdc).toFixed(4) : '--'}</td>
+            <td class="col-vwap">${Number(f.vwap_after).toFixed(4)}</td>
+            <td class="col-cost">${Number(cumCost).toFixed(2)}</td>
+            <td class="col-pnl"></td>
+            <td class="col-pnl"></td>
+            <td class="col-reason"></td>
+          </tr>`;
+        }
+      }
+    }
+    tbody.innerHTML = html || '<tr><td colspan="15" class="no-data">暂无记录</td></tr>';
+  }
+
+  document.getElementById('btn-prev').disabled = page <= 1;
+  document.getElementById('btn-next').disabled = d.trades.length < 15;
+  const totalPages = Math.ceil(d.total / 15);
+  document.getElementById('page-info').textContent = `第 ${page} / ${totalPages} 页，共 ${d.total} 条`;
+}
+
+function toggleTrade(el) {
+  const id = el.getAttribute('data-id');
+  const wasExpanded = _expandedTrades.has(id);
+  if (wasExpanded) {
+    _expandedTrades.delete(id);
+    el.classList.remove('expanded');
+    document.querySelectorAll(`tr[data-parent="${id}"]`).forEach(r => r.classList.remove('open'));
+  } else {
+    _expandedTrades.add(id);
+    el.classList.add('expanded');
+    document.querySelectorAll(`tr[data-parent="${id}"]`).forEach(r => r.classList.add('open'));
+  }
+}
+
+function changePage(delta) {
+  page = Math.max(1, page + delta);
+  _expandedTrades.clear();
+  loadTrades();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+checkAuth();
+</script>
+</body>
+</html>

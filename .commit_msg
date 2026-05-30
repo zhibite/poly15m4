@@ -1,0 +1,6 @@
+fix(trade): record total position cost in Trade.bet_usdc instead of first-leg amount
+
+pos.bet_usdc was fixed at first entry (base stake only) and never updated
+when martingale add-legs merged into the position. Trade records showed a
+significantly understated total investment. Switch to pos.actual_cost_usdc
+which is the authoritative merged cost (first leg + all add-legs).
