@@ -142,10 +142,10 @@ class LiveTrader:
         self._redeem_lock: threading.RLock = threading.RLock()
         self._balance_cache_stale: bool = False
         # Token balance cache: maps token_id → (balance_human, timestamp_sec).
-        # TTL of 1.5s reduces redundant CLOB API calls during high-frequency polling
-        # (e.g. close_loop) while keeping balance precision acceptable for partial-fill detection.
+        # TTL of 0.3s keeps balance fresh during 1s polling cycles while
+        # still avoiding redundant CLOB API calls from multiple close events.
         self._token_balance_cache: dict[str, tuple[float, float]] = {}
-        self._TOKEN_BALANCE_CACHE_TTL: float = 1.5  # seconds — 统一为 1.5s（修正 R12 注释/值不一致）
+        self._TOKEN_BALANCE_CACHE_TTL: float = 0.3
         self._init_sync(api_key, api_secret, api_passphrase)
 
     def _init_sync(self, api_key: str, api_secret: str, api_passphrase: str):
@@ -1586,7 +1586,18 @@ class LiveTrader:
 
         bal_before = _erc20_balance_raw(wallet, _PUSD, settings.polygon_rpc_url) or 0
 
-        cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+        # Validate condition_id before hex decoding to avoid ValueError on invalid input
+        hex_str = condition_id.replace("0x", "").replace("0X", "")
+        if not all(c in "0123456789abcdefABCDEF" for c in hex_str):
+            raise ValueError(
+                f"Invalid condition_id format (non-hex characters): {condition_id[:20]!r}"
+            )
+        if len(hex_str) != 64:
+            raise ValueError(
+                f"Invalid condition_id length: expected 64 hex chars, got {len(hex_str)} "
+                f"for {condition_id[:20]!r}"
+            )
+        cond_bytes = bytes.fromhex(hex_str)
         # 1 << 255 is the conventional sentinel value used by the CTF / NegRiskAdapter
         #redeemPositions to indicate "redeem all tokens".  While mathematically it is
         # type(int256).min rather than type(uint256).max, it is the value hard-coded
@@ -1612,10 +1623,12 @@ class LiveTrader:
                 estimated_gas = int(w3.eth.estimate_gas(fn.build_transaction(base_tx)) * 1.3)
             except Exception as exc:
                 logger.warning(
-                    "redeem gas estimate failed: {} — using fallback gas={}",
-                    exc, 450_000,
+                    "redeem gas estimate failed: {} — using conservative fallback gas",
+                    exc,
                 )
-                estimated_gas = 450_000  # redeemPositions for 2 token outcomes on Polygon needs ~300-450k
+                # redeemPositions for 2 token outcomes on Polygon typically needs 300-450k gas.
+                # Use 500k as a safe upper-bound fallback to avoid out-of-gas reverts.
+                estimated_gas = 500_000
 
             latest_block = w3.eth.get_block("latest")
             base_fee = latest_block.get("baseFeePerGas", w3.eth.gas_price)
@@ -1700,4 +1713,15 @@ class LiveTrader:
         self._pm_client = pm
 
     def close(self):
+        if self._pm_client is not None:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._pm_client.close())
+                finally:
+                    loop.close()
+            except Exception as exc:
+                logger.debug("pm_client.close() failed: {}", exc)
         logger.info("LiveTrader v2 closed.")

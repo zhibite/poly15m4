@@ -459,6 +459,7 @@ class PositionManager:
             total_sold_tokens += actual_tokens
             total_sold_usdc += actual_usdc
             remaining_tokens = max(0.0, remaining_tokens - actual_tokens)
+            final_reason = close_reason
             # Track actual fill average separately from dust/force-sell cleanup proceeds.
             _actual_fill_total_tokens += actual_tokens
             _actual_fill_total_usdc += actual_usdc
@@ -566,6 +567,7 @@ class PositionManager:
         """
         mkt = resolved_market if resolved_market is not None else pos.market
         already_recorded = pos._trade_recorded
+        # Always reset to 1.0 (full close) on new close call; override only for partial.
         pos._pending_partial_pct = partial_close_pct if partial_close_pct is not None else 1.0
 
         # ── skip_record 路径：仅清理链上余额 ────────────────────────────────
@@ -671,7 +673,7 @@ class PositionManager:
         tokens_at_entry = pos.tokens_bought
 
         # ── 部分平仓：仅卖出 50% ──────────────────────────────────────────────
-        if partial_close_pct is not None and live_trader is not None:
+        if partial_close_pct and partial_close_pct > 0 and live_trader is not None:
             tokens_to_sell = tokens_at_entry * partial_close_pct
             live_trader.invalidate_token_balance_cache(pos.token_id_bought)
             current_live = await live_trader.get_token_balance(pos.token_id_bought)
@@ -1014,6 +1016,16 @@ class PositionManager:
         partial_pct = pos._pending_partial_pct
 
         async with async_session() as db:
+            # ── Count actual Fill records for this position ─────────────────────
+            from sqlalchemy import func, select
+            fill_count_row = await db.execute(
+                select(func.count(Fill.id)).where(
+                    Fill.condition_id == pos.condition_id,
+                    Fill.asset == pos.asset,
+                )
+            )
+            actual_fills = fill_count_row.scalar() or 1
+
             # ── 写入 ExitRecord（卖出记录）──────────────────────────────────
             exit_record = ExitRecord(
                 asset=pos.asset,
@@ -1046,7 +1058,7 @@ class PositionManager:
                 close_reason=close_reason,
                 bet_usdc=pos.actual_cost_usdc,
                 mode="live" if is_live else "dry",
-                fills=1,
+                fills=actual_fills,
                 opened_at=pos.opened_at,
                 closed_at=now,
             )
@@ -1054,9 +1066,14 @@ class PositionManager:
             await db.flush()
 
             # Link any orphan Fill records for this position (trade_id=NULL).
+            # Filter by both asset AND condition_id to avoid linking fills from different windows.
             await db.execute(
                 update(Fill)
-                .where(Fill.asset == pos.asset, Fill.trade_id.is_(None))
+                .where(
+                    Fill.asset == pos.asset,
+                    Fill.condition_id == pos.condition_id,
+                    Fill.trade_id.is_(None),
+                )
                 .values(trade_id=trade.id)
             )
 

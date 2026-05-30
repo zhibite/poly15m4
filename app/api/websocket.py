@@ -6,6 +6,7 @@ websocket.py — WebSocket endpoints:
 
 import asyncio
 import copy
+import threading
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -13,7 +14,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from app.pm_client import PolymarketClient
-from app.runtime_config import get_config
+from app.runtime_config import get_config, _latest_lock
 
 
 def _serialize_for_json(obj):
@@ -56,9 +57,12 @@ async def ws_live(ws: WebSocket):
                     last_pong_at = datetime.now(timezone.utc)
                 except Exception:
                     break
-            latest = getattr(strategy_ref, "_latest", {})
-            if latest:
-                payload = _serialize_for_json(latest)
+            # Thread-safe read of _latest to avoid racing with strategy loop updates
+            with _latest_lock:
+                raw_latest = getattr(strategy_ref, "_latest", None)
+                snapshot = copy.deepcopy(raw_latest) if raw_latest else {}
+            if snapshot:
+                payload = _serialize_for_json(snapshot)
                 payload["ts"] = datetime.now(timezone.utc).isoformat()
                 await ws.send_json(payload)
                 last_pong_at = datetime.now(timezone.utc)

@@ -195,58 +195,78 @@ async def _liq_ws_listener(asset: str):
     symbol_fut = f"{asset}USDT"
     ws_url = "wss://fstream.binance.com:9443/ws/!forceOrder@arr"
     bucket_ttl = 30 * 60   # 30 minutes
+    reconnect_delay = 5.0    # seconds before reconnecting
+    max_reconnect_attempts = 5
+    reconnect_attempts = 0
 
-    try:
-        async with websockets.connect(ws_url, ping_timeout=20) as ws:
-            _liq_ws_running[asset] = True
-            logger.info("Liquidation WS connected for {}", asset)
+    while True:
+        try:
+            async with websockets.connect(ws_url, ping_timeout=20) as ws:
+                _liq_ws_running[asset] = True
+                reconnect_attempts = 0  # Reset on successful connection
+                logger.info("Liquidation WS connected for {}", asset)
 
-            while _liq_ws_running.get(asset, False):
-                try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                    payload = __import__("json").loads(msg)
-
-                    orders = payload if isinstance(payload, list) else [payload]
-                    for order in orders:
-                        try:
-                            o = order.get("o", {})
-                            if o.get("s") != symbol_fut:
-                                continue
-                            filled_qty = float(o.get("l", 0))
-                            if filled_qty <= 0:
-                                continue
-                            price = float(o.get("ap", 0))
-                            side = o.get("S", "")
-                            direction = "long" if side == "SELL" else "short"
-                            bucket = {
-                                "price": price,
-                                "qty": filled_qty,
-                                "direction": direction,
-                                "ts": time.time(),
-                            }
-
-                            with _liq_buckets_lock:
-                                buckets = _liq_buckets.setdefault(asset, [])
-                                buckets.append(bucket)
-                                cutoff = time.time() - bucket_ttl
-                                _liq_buckets[asset] = [b for b in buckets if b["ts"] > cutoff]
-
-                        except (TypeError, ValueError, KeyError):
-                            continue
-
-                except asyncio.TimeoutError:
+                while _liq_ws_running.get(asset, False):
                     try:
-                        await ws.ping()
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        payload = __import__("json").loads(msg)
+
+                        orders = payload if isinstance(payload, list) else [payload]
+                        for order in orders:
+                            try:
+                                o = order.get("o", {})
+                                if o.get("s") != symbol_fut:
+                                    continue
+                                filled_qty = float(o.get("l", 0))
+                                if filled_qty <= 0:
+                                    continue
+                                price = float(o.get("ap", 0))
+                                side = o.get("S", "")
+                                direction = "long" if side == "SELL" else "short"
+                                bucket = {
+                                    "price": price,
+                                    "qty": filled_qty,
+                                    "direction": direction,
+                                    "ts": time.time(),
+                                }
+
+                                with _liq_buckets_lock:
+                                    buckets = _liq_buckets.setdefault(asset, [])
+                                    buckets.append(bucket)
+                                    cutoff = time.time() - bucket_ttl
+                                    _liq_buckets[asset] = [b for b in buckets if b["ts"] > cutoff]
+
+                            except (TypeError, ValueError, KeyError):
+                                continue
+
+                    except asyncio.TimeoutError:
+                        try:
+                            await ws.ping()
+                        except Exception:
+                            break
+                    except websockets.ConnectionClosed:
+                        logger.warning("Liquidation WS for {} connection closed, reconnecting...", asset)
+                        break
                     except Exception:
                         break
-                except Exception:
-                    break
 
-    except Exception as exc:
-        logger.debug("Liquidation WS for {} closed: {}", asset, exc)
-    finally:
+        except websockets.ConnectionClosed:
+            logger.warning("Liquidation WS for {} failed to connect, retrying in {:.0f}s...", asset, reconnect_delay)
+        except Exception as exc:
+            logger.warning("Liquidation WS for {} error: {}, retrying in {:.0f}s...", asset, exc, reconnect_delay)
+
         _liq_ws_running[asset] = False
-        _liq_ws[asset] = None
+
+        # Reconnect with exponential backoff
+        reconnect_attempts += 1
+        if max_reconnect_attempts > 0 and reconnect_attempts > max_reconnect_attempts:
+            logger.error(
+                "Liquidation WS for {} exhausted {} reconnect attempts — giving up. "
+                "Liquidation data will be unavailable until server restart.",
+                asset, max_reconnect_attempts,
+            )
+            break
+        await asyncio.sleep(reconnect_delay)
 
 
 def _build_liquidation(asset: str, current_price: float) -> dict:
@@ -506,20 +526,33 @@ async def get_indicators(asset: str = "BTC"):
     all_markets = await _get_both_market_prices()
 
     # ── 3. Spot prices from Binance ticker ───────────────────────────────────
+    # NOTE: `_spot_btc` / `_spot_eth` are module-level globals. Do NOT assign
+    # to them with a bare `=` inside an async function — Python treats the name
+    # as a local variable from the point of the first assignment, shadowing the
+    # global. Use a temporary local variable and assign to the global once only.
     try:
+        _tmp_btc: float = 0.0
+        _tmp_eth: float = 0.0
         async with httpx.AsyncClient(timeout=5.0) as client:
-            btc_r = await client.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": "BTCUSDT"},
-            )
-            eth_r = await client.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": "ETHUSDT"},
+            btc_r, eth_r = await asyncio.gather(
+                client.get(
+                    "https://api.binance.com/api/v3/ticker/price",
+                    params={"symbol": "BTCUSDT"},
+                ),
+                client.get(
+                    "https://api.binance.com/api/v3/ticker/price",
+                    params={"symbol": "ETHUSDT"},
+                ),
             )
             if btc_r.status_code == 200:
-                _spot_btc = float(btc_r.json().get("price", 0))
+                _tmp_btc = float(btc_r.json().get("price", 0))
             if eth_r.status_code == 200:
-                _spot_eth = float(eth_r.json().get("price", 0))
+                _tmp_eth = float(eth_r.json().get("price", 0))
+        # Assign once to the module-level global (outside the scope where the
+        # local name `_spot_btc` / `_spot_eth` is visible).
+        global _spot_btc, _spot_eth
+        _spot_btc = _tmp_btc
+        _spot_eth = _tmp_eth
     except Exception:
         pass
 
@@ -839,17 +872,6 @@ async def get_signal_recommendation(asset: str = "BTC"):
 
     cvd_val = await fetch_binance_cvd(symbol_spot) or 0.0
 
-    # CVD Z-score
-    _cvd_baseline_local = _cvd_baseline.setdefault(asset, [])
-    _cvd_baseline_local.append(abs(cvd_val))
-    if len(_cvd_baseline_local) > _MAX_BASELINE:
-        _cvd_baseline_local.pop(0)
-    cvd_z = 0.0
-    if len(_cvd_baseline_local) >= 3:
-        mean = sum(_cvd_baseline_local) / len(_cvd_baseline_local)
-        std = (sum((x - mean) ** 2 for x in _cvd_baseline_local) / max(len(_cvd_baseline_local) - 1, 1)) ** 0.5
-        cvd_z = (abs(cvd_val) - mean) / std if std > 0 else 0.0
-
     # Liquidation
     await _ensure_liq_ws(asset)
     liq = _build_liquidation(asset, spot_price)
@@ -879,7 +901,7 @@ async def get_signal_recommendation(asset: str = "BTC"):
     elapsed_sec = (now_dt - window_start).total_seconds()
     remaining_sec = max(0.0, 900 - elapsed_sec)
 
-    # 调用信号服务
+    # 调用信号服务（其内部会追加 CVD 到 baseline 并计算 Z-score）
     from app.strategy.indicator_signal_service import IndicatorSignalService
     svc = IndicatorSignalService(asset)
     result = await svc.get_signal(
@@ -889,6 +911,18 @@ async def get_signal_recommendation(asset: str = "BTC"):
         window_start=window_start,
         window_duration_sec=900,
     )
+
+    # CVD Z-score 由服务内部计算；提取 raw_value 中的 Z 用于响应
+    # 格式如 "1234.56 (Z=2.34)"
+    cvd_z = 0.0
+    try:
+        raw = result.advanced.cvd.raw_value
+        import re as _re
+        m = _re.search(r"Z=([-\d.]+)", raw)
+        if m:
+            cvd_z = float(m.group(1))
+    except Exception:
+        pass
 
     # 构建响应
     core_items = []
@@ -954,6 +988,7 @@ async def get_signal_recommendation(asset: str = "BTC"):
         "rsi": {"value": round(rsi, 1)},
         "funding": {"value": round(funding_val * 100, 4)},
         "atr": round(atr, 4),
+        "cvd_z": round(cvd_z, 3),
         "up_mid_raw": up_mid,
         "down_mid_raw": down_mid,
     }

@@ -293,30 +293,44 @@ class IndicatorSignalService:
         if n < 20:
             return False, SignalDir.SKIP, ""
 
-        # Compute RSI series for the lookback window
-        rsi_vals = [_calc_rsi(price_slice[:i+1]) for i in range(len(price_slice))]
+        # Compute RSI series once (O(n)) — avoids the O(n²) bug of calling
+        # _calc_rsi on every expanding prefix.  _calc_rsi is O(n) each call.
+        rsi_vals = [_calc_rsi(price_slice[: i + 1]) for i in range(n)]
         if not rsi_vals:
             return False, SignalDir.SKIP, ""
 
-        # Find LAST occurrence so we correctly detect if the last bar is the new extreme
-        rsi_lookback = rsi_vals[:n]
-        rsi_last_max_pos = len(rsi_lookback) - 1 - rsi_lookback[::-1].index(max(rsi_lookback))
-        rsi_new_high = (rsi_last_max_pos == n - 1)
-        rsi_last_min_pos = len(rsi_lookback) - 1 - rsi_lookback[::-1].index(min(rsi_lookback))
-        rsi_new_low = (rsi_last_min_pos == n - 1)
+        # Find extremes in O(n) instead of O(n) per lookup via reversed slicing.
+        # rsi_max_pos: index of max RSI in the lookback window
+        rsi_max_pos, rsi_max_val = 0, rsi_vals[0]
+        rsi_min_pos, rsi_min_val = 0, rsi_vals[0]
+        for i in range(1, n):
+            if rsi_vals[i] > rsi_max_val:
+                rsi_max_val = rsi_vals[i]
+                rsi_max_pos = i
+            if rsi_vals[i] < rsi_min_val:
+                rsi_min_val = rsi_vals[i]
+                rsi_min_pos = i
 
-        price_last_max_pos = len(price_slice) - 1 - price_slice[::-1].index(max(price_slice))
-        price_new_high = (price_last_max_pos == n - 1)
-        price_last_min_pos = len(price_slice) - 1 - price_slice[::-1].index(min(price_slice))
-        price_new_low = (price_last_min_pos == n - 1)
+        price_max_pos, price_max_val = 0, price_slice[0]
+        price_min_pos, price_min_val = 0, price_slice[0]
+        for i in range(1, n):
+            if price_slice[i] > price_max_val:
+                price_max_val = price_slice[i]
+                price_max_pos = i
+            if price_slice[i] < price_min_val:
+                price_min_val = price_slice[i]
+                price_min_pos = i
 
-        if price_new_high and rsi_new_high and len(rsi_vals) >= 2:
-            prev_rsi_idx = max(0, n - 2)
-            if rsi_vals[prev_rsi_idx] > rsi_vals[-1]:
+        rsi_new_high = (rsi_max_pos == n - 1)
+        rsi_new_low = (rsi_min_pos == n - 1)
+        price_new_high = (price_max_pos == n - 1)
+        price_new_low = (price_min_pos == n - 1)
+
+        if price_new_high and rsi_new_high and n >= 2:
+            if rsi_vals[n - 2] > rsi_vals[-1]:
                 return True, SignalDir.DOWN, "RSI 看跌背离（价格新高，RSI 高点下降），做 DOWN"
-        if price_new_low and rsi_new_low and len(rsi_vals) >= 2:
-            prev_rsi_idx = max(0, n - 2)
-            if rsi_vals[prev_rsi_idx] < rsi_vals[-1]:
+        if price_new_low and rsi_new_low and n >= 2:
+            if rsi_vals[n - 2] < rsi_vals[-1]:
                 return True, SignalDir.UP, "RSI 看涨背离（价格新低，RSI 低点上升），做 UP"
         return False, SignalDir.SKIP, ""
 
@@ -766,8 +780,8 @@ class IndicatorSignalService:
         seed = sum(closes[:period]) / period
         result.append(seed)
         for i in range(period, len(closes)):
-            val = (closes[i] - result[-1]) * k + result[-1]
-            result.append(val)
+        val = result[-1] + (closes[i] - result[-1]) * k
+        result.append(val)
         return result
 
     # ── 并发获取 ────────────────────────────────────────────────
@@ -1105,8 +1119,8 @@ class IndicatorSignalService:
                 "ema9":  round(ema9_val, 4),
                 "ema21": round(ema21_val, 4),
                 "cross": ema_cross,
-                "ema9_history":  [round(v, 4) for v in self._calc_ema_series(closes, 9)[-30:]] if closes else [],
-                "ema21_history": [round(v, 4) for v in self._calc_ema_series(closes, 21)[-30:]] if closes else [],
+                "ema9_history":  [round(v, 4) for v in ema9_full[-30:]] if closes else [],
+                "ema21_history": [round(v, 4) for v in ema21_full[-30:]] if closes else [],
                 "price": [round(c, 4) for c in closes[-30:]] if closes else [],
             },
             "pivot": {

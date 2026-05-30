@@ -302,7 +302,7 @@ def wrap_usdc_native_to_pusd(
 
     wallet = account.address
     amount_raw = int(Decimal(str(usdc_amount)) * Decimal("1_000_000"))
-    logger.info("wrap_usdc_native_to_pusd: wallet=%s amount=%.6f raw=%d", wallet, usdc_amount, amount_raw)
+    logger.info("wrap_usdc_native_to_pusd: wallet={} amount={:.6f} raw={}", wallet, usdc_amount, amount_raw)
 
     # Step 1: approve native USDC → CollateralOnramp
     approve_calldata = _build_approve_calldata(onramp_address, amount_raw)
@@ -310,26 +310,26 @@ def wrap_usdc_native_to_pusd(
         _send_raw_tx(w3, POLYGON_USDC_NATIVE, approve_calldata, wallet, private_key)
         logger.info("wrap_usdc_native_to_pusd: approve tx sent")
     except Exception as exc:
-        logger.error("wrap_usdc_native_to_pusd: approve failed: %s", exc)
+        logger.error("wrap_usdc_native_to_pusd: approve failed: {}", exc)
         return {"success": False, "tx_hash": "", "error": f"approve native USDC failed: {exc}"}
 
     # Step 2: wrap native USDC → pUSD
     wrap_calldata = _build_wrap_calldata(POLYGON_USDC_NATIVE, wallet, amount_raw)
     try:
         tx_hash = _send_raw_tx(w3, onramp_address, wrap_calldata, wallet, private_key)
-        logger.info("wrap_usdc_native_to_pusd: wrap tx confirmed: %s", tx_hash)
+        logger.info("wrap_usdc_native_to_pusd: wrap tx confirmed: {}", tx_hash)
         return {"success": True, "tx_hash": tx_hash, "error": ""}
     except Exception as exc:
         # CRITICAL FIX (R7): wrap failed — revoke the approval to avoid leaving a lingering
         # allowance. Without this, the CollateralOnramp could spend the approved native USDC
         # in a subsequent call.
-        logger.warning("wrap_usdc_native_to_pusd: wrap failed: %s — revoking approval", exc)
+        logger.warning("wrap_usdc_native_to_pusd: wrap failed: {} — revoking approval", exc)
         try:
             revoke_calldata = _build_approve_calldata(onramp_address, 0)
             _send_raw_tx(w3, POLYGON_USDC_NATIVE, revoke_calldata, wallet, private_key)
             logger.info("wrap_usdc_native_to_pusd: native USDC approval revoked after failed wrap")
         except Exception as revoke_exc:
-            logger.error("Failed to revoke native USDC approval after wrap failure: %s", revoke_exc)
+            logger.error("Failed to revoke native USDC approval after wrap failure: {}", revoke_exc)
         return {"success": False, "tx_hash": "", "error": f"wrap failed: {exc}"}
 
 

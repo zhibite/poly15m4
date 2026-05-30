@@ -13,6 +13,10 @@ _ENV_PATH: str | None = None
 _creds_lock = threading.Lock()
 _config_lock = threading.Lock()
 
+# Lock for thread-safe access to the shared _latest state dict
+# used by strategy.py (writer) and websocket.py (reader).
+_latest_lock = threading.Lock()
+
 
 def _init_env_path():
     global _ENV_PATH
@@ -105,10 +109,13 @@ _runtime: dict = {
     "entry_price_max_tp":           float(_env("TP_ENTRY_PRICE_MAX", "0.60")),
     "sl_base_pct":                  float(_env("SL_BASE_PCT", "-10.0")),
     # 动态阈值基础值（exit_controller._compute_realtime_signal 使用）
-    "tp1_base_pct":                 float(_env("TP1_BASE_PCT", "15.0")),
-    "tp2_base_pct":                 float(_env("TP2_BASE_PCT", "30.0")),
+    "tp1_base_pct":                 float(_env("TP1_BASE_PCT", "8.0")),
+    "tp2_base_pct":                 float(_env("TP2_BASE_PCT", "20.0")),
     "trailing_gap_base":            float(_env("TRAILING_GAP_BASE", "0.20")),
     "trailing_activate_pct":         float(_env("TRAILING_ACTIVATE_PCT", "70.0")),
+    "atr_mult_max":                  float(_env("ATR_MULT_MAX", "2.0")),
+    # 移动止损回撤比例（入场价回撤多少触发止损，如 0.25 表示入场价回撤 25%）
+    "trailing_gap_pct":               float(_env("TRAILING_GAP_PCT", "25.0")),
 }
 
 _ENV_KEYS: dict[str, str] = {
@@ -143,6 +150,8 @@ _ENV_KEYS: dict[str, str] = {
     "tp2_base_pct":                 "TP2_BASE_PCT",
     "trailing_gap_base":            "TRAILING_GAP_BASE",
     "trailing_activate_pct":          "TRAILING_ACTIVATE_PCT",
+    "atr_mult_max":                    "ATR_MULT_MAX",
+    "trailing_gap_pct":               "TRAILING_GAP_PCT",
 }
 
 # 缓存上次返回的深拷贝，仅当 _runtime 实际更新后才重新生成。
@@ -158,6 +167,7 @@ def get_config() -> dict:
         if _config_cache is None or _config_runtime_version != _config_cache_version:
             _config_cache = copy.deepcopy(dict(_runtime))
             _config_cache_version = _config_runtime_version
+        # Return a fresh deep copy so callers cannot mutate the cached state.
         return copy.deepcopy(_config_cache)
 
 

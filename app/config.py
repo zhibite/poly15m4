@@ -2,8 +2,10 @@
 config.py — Static settings from .env (pydantic-settings).
 """
 
-from pathlib import Path
+import logging
 import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 
@@ -59,10 +61,6 @@ class Settings(BaseSettings):
         "env_ignore_empty": True,
     }
 
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 settings = Settings()
 

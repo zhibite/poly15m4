@@ -140,7 +140,8 @@ class RealtimeSignal:
     dynamic_sl: float = 0.0       # 动态止损（负值）
     dynamic_tp1: float = 0.0      # 动态 TP1
     dynamic_tp2: float = 0.0      # 动态 TP2
-    trailing_gap: float = 0.0     # 移动止损间距
+    trailing_gap: float = 0.0     # 移动止损间距（绝对值，基于入场价 × trailing_gap_pct）
+    trailing_gap_pct: float = 25.0  # 移动止损回撤百分比（0~100）
     # 三重门命中结果
     gate1_triggered: bool = False
     gate1_action: str = ""
@@ -237,9 +238,11 @@ def _compute_realtime_signal(
     mkt=None,
     *,
     base_sl: float = -10.0,
-    base_tp1: float = 15.0,
-    base_tp2: float = 30.0,
+    base_tp1: float = 8.0,
+    base_tp2: float = 20.0,
     base_trailing_gap: float = 0.20,
+    atr_mult_max: float = 2.0,
+    trailing_gap_pct: float = 25.0,
 ) -> RealtimeSignal:
     """
     根据传入的实时指标 dict，计算 Core 6 共识数量和方向。
@@ -248,8 +251,10 @@ def _compute_realtime_signal(
 
     mkt: MarketInfo 实例（含 _price_history），用于计算概率 ATR。
          若为 None 则降级使用 Binance 美元 ATR（向后兼容）。
-    base_sl / base_tp1 / base_tp2 / base_trailing_gap:
+    base_sl / base_tp1 / base_tp2 / base_trailing_gap / trailing_gap_pct:
          运行时可调参数，由 sync_params 注入（P3-10）。
+    trailing_gap_pct: 入场价的回撤百分比（0~100），用于计算移动止损触发线。
+         旧版 base_trailing_gap 是概率绝对差值，已废弃，仅保留用于向后兼容。
     """
     # ── P0 Fix: 优先使用 Polymarket 概率 ATR，fallback 到 Binance 美元 ATR ──
     # 文档第五章明确要求概率 ATR：
@@ -262,7 +267,7 @@ def _compute_realtime_signal(
         if indicators and "atr" in indicators:
             atr_val = float(indicators["atr"])
 
-    atr_mult = min(1.0 + atr_val / 0.02, 3.0)
+    atr_mult = min(1.0 + atr_val / 0.02, atr_mult_max)
 
     # 趋势强度 + 乘数
     trend_strength, trend_mult = _compute_trend_strength(indicators, pos_side)
@@ -272,7 +277,7 @@ def _compute_realtime_signal(
     dyn_sl = min(dyn_sl, -5.0)
     dyn_tp1 = max(base_tp1 * atr_mult * trend_mult, 8.0)
     dyn_tp2 = max(base_tp2 * atr_mult * trend_mult, dyn_tp1 + 5.0)
-    trailing_gap = 0.20 / trend_mult
+    trailing_gap = 0.20 / trend_mult  # 旧逻辑：概率绝对差（向后兼容）
 
     # Core 6 共识计算（从 indicators dict 提取）
     agree_count = 0
@@ -289,13 +294,25 @@ def _compute_realtime_signal(
         ind_bbands = indicators.get("bbands", {})
 
         def _is_agree(ind: dict, pos_side: Side) -> bool | None:
+            """
+            Return True if the indicator signal aligns with the position direction,
+            False if it opposes it, None if it is neutral.
+
+            BBands signals in probability space:
+              - upper_touch: upward momentum (price hitting/reaching upper band)
+              - lower_touch: downward momentum (price hitting/falling through lower band)
+            """
             sig = ind.get("signal", "")
             if pos_side == Side.UP:
-                if sig in ("oversold", "golden", "above", "upper_touch", "below"):
+                # UP-aligned: oversold bounce, golden cross, price above, upper touch.
+                # UP-opposing: overbought, death cross, lower touch.
+                if sig in ("oversold", "golden", "above", "upper_touch"):
                     return True
                 if sig in ("overbought", "death", "lower_touch"):
                     return False
             else:  # Side.DOWN
+                # DOWN-aligned: overbought drop, death cross, lower touch.
+                # DOWN-opposing: oversold, golden cross, upper touch.
                 if sig in ("overbought", "death", "lower_touch"):
                     return True
                 if sig in ("oversold", "golden", "above", "upper_touch"):
@@ -351,6 +368,7 @@ def _compute_realtime_signal(
         dynamic_tp1=dyn_tp1,
         dynamic_tp2=dyn_tp2,
         trailing_gap=trailing_gap,
+        trailing_gap_pct=trailing_gap_pct,
         cvd_reverse=cvd_reverse,
         cvd_z=cvd_z,
     )
@@ -384,16 +402,20 @@ class ExitController:
         self._last_signal: dict[str, RealtimeSignal] = {}
         # ── P3-10 Fix: 支持运行时调参 ────────────────────────────────
         self._base_sl: float = -10.0
-        self._base_tp1: float = 15.0
-        self._base_tp2: float = 30.0
+        self._base_tp1: float = 8.0
+        self._base_tp2: float = 20.0
         self._base_trailing_gap: float = 0.20
+        self._atr_mult_max: float = 2.0
+        self._trailing_gap_pct: float = 25.0
 
     def sync_params(self, cfg: dict) -> None:
         """从 runtime_config 同步退出阈值参数，支持运行时热更新"""
         self._base_sl = float(cfg.get("sl_base_pct", -10.0))
-        self._base_tp1 = float(cfg.get("tp1_base_pct", 15.0))
-        self._base_tp2 = float(cfg.get("tp2_base_pct", 30.0))
+        self._base_tp1 = float(cfg.get("tp1_base_pct", 8.0))
+        self._base_tp2 = float(cfg.get("tp2_base_pct", 20.0))
         self._base_trailing_gap = float(cfg.get("trailing_gap_base", 0.20))
+        self._atr_mult_max = float(cfg.get("atr_mult_max", 2.0))
+        self._trailing_gap_pct = float(cfg.get("trailing_gap_pct", 25.0))
 
     # ── P3-12 Fix: 废弃 _get_dynamic_thresholds，统一由 _compute_realtime_signal 计算 ─
     # 此函数已被 _compute_realtime_signal 取代（内含概率 ATR 计算），
@@ -407,7 +429,7 @@ class ExitController:
         Returns: (dynamic_sl, dynamic_tp1, dynamic_tp2)
         """
         atr = _compute_atr_probability(mkt, lookback=6)
-        mult = min(1.0 + atr / 0.02, 3.0)
+        mult = min(1.0 + atr / 0.02, 2.0)
         dyn_sl  = max(min(self._base_sl * mult, -5.0), -30.0)
         dyn_tp1 = max(self._base_tp1 * mult, 8.0)
         dyn_tp2 = max(self._base_tp2 * mult, dyn_tp1 + 5.0)
@@ -442,7 +464,7 @@ class ExitController:
             sig.gate1_triggered = True
             sig.gate1_action = "EXIT_NOW"
             sig.gate1_reason = (
-                f"Gate1: CVD 反向最强信号 Z={cvd_z:.2f}，立即离场"
+                f"Gate1: CVD reverse strongest signal Z={cvd_z:.2f}, exit immediately"
                 f" pnl={delta_pct:+.1f}%"
             )
             pos.tp_hit = {
@@ -496,8 +518,8 @@ class ExitController:
                 sig.gate2_triggered = True
                 sig.gate2_action = "CONTINUE"
                 sig.gate2_reason = (
-                    f"Gate2: TP1命中(+{delta_pct:.1f}%)但信号同向{sig.agree_count}/6，"
-                    f"跳过止盈继续持仓"
+                    f"Gate2: TP1 hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
+                    f"skip TP, continue holding"
                 )
                 sig.decision = "HOLD"
                 return ExitSignal(
@@ -513,8 +535,8 @@ class ExitController:
                 sig.gate2_triggered = True
                 sig.gate2_action = "CONTINUE"
                 sig.gate2_reason = (
-                    f"Gate2: TP2命中(+{delta_pct:.1f}%)但信号同向{sig.agree_count}/6，"
-                    f"跳过止盈继续持仓"
+                    f"Gate2: TP2 hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
+                    f"skip TP, continue holding"
                 )
                 sig.decision = "HOLD"
                 return ExitSignal(
@@ -532,18 +554,25 @@ class ExitController:
             if sig.agree_count < 3 or current_price >= trailing_activate:
                 sig.gate3_triggered = True
                 sig.gate3_action = "ACTIVATE_TRAILING"
+                # 基于入场价回撤计算跟踪线（代替旧版概率绝对差）
+                # 跟踪线 = 入场价 - 入场价 × 回撤比例 = 入场价 × (1 - trailing_gap_pct/100)
+                entry_price = pos.entry_price if pos.entry_price > 0 else current_price
+                trail_line = entry_price * (1.0 - sig.trailing_gap_pct / 100.0)
                 sig.gate3_reason = (
-                    f"Gate3: 激活移动止损 "
+                    f"Gate3: trailing stop activated "
                     f"(prob={current_price:.4f}>={trailing_activate:.4f} "
-                    f"OR agree={sig.agree_count}/6<3)"
+                    f"OR agree={sig.agree_count}/6<3) "
+                    f"trailing_line={trail_line:.4f}(entry={entry_price:.4f}@{sig.trailing_gap_pct:.1f}%)"
                 )
                 pos.trailing_stop_activated = True
-                pos.trailing_stop_pct = max(0.0, current_price - sig.trailing_gap)
+                pos.trailing_stop_pct = max(0.01, trail_line)
                 logger.info(
-                    "GATE3 ACTIVATE [{}] {} prob={:.4f} trailing_line={:.4f} "
+                    "GATE3 ACTIVATE [{}] {} prob={:.4f} entry={:.4f} "
+                    "trailing_line={:.4f} gap_pct={:.1f}% "
                     "agree={}/6 atr_mult={:.2f} trend={:.0f} trend_mult={:.2f}",
                     pos.asset, pos_side.value, current_price,
-                    pos.trailing_stop_pct, sig.agree_count, sig.atr_mult,
+                    entry_price, pos.trailing_stop_pct, sig.trailing_gap_pct,
+                    sig.agree_count, sig.atr_mult,
                     sig.trend_strength, sig.trend_mult,
                 )
 
@@ -554,10 +583,10 @@ class ExitController:
                 sig.gate3_triggered = True
                 sig.gate3_action = "TRAILING_EXIT"
                 sig.gate3_reason = (
-                    f"Gate3: 跟踪线被触及 {trail_line:.4f}<=当前{current_price:.4f}"
+                    f"Gate3: trailing line hit {trail_line:.4f}<=current {current_price:.4f}"
                 )
                 pos.tp_hit = {
-                    "kind": "移动止盈（跟踪线）",
+                    "kind": "trailing_profit",
                     "gate": "gate3_trailing",
                     "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
                     "exit_price": current_price,
@@ -576,8 +605,15 @@ class ExitController:
                     take_profit_pct=pos.tp_pct,
                 ), sig
             # 跟随市场上移跟踪线（只上移，不下移）
+            # 跟踪线锚定到峰值价格，而非入场价
+            # → 真正的移动止损：锁定利润，允许市场继续上涨
+            peak_price = getattr(pos, "_peak_price", pos.entry_price)
+            if current_price > peak_price:
+                peak_price = current_price
+                pos._peak_price = peak_price
+            new_trail = peak_price * (1.0 - sig.trailing_gap_pct / 100.0)
             if current_price > trail_line + 0.005:
-                pos.trailing_stop_pct = max(trail_line, current_price - sig.trailing_gap)
+                pos.trailing_stop_pct = max(trail_line, new_trail)
 
         return ExitSignal(
             should_exit=False,
@@ -609,6 +645,7 @@ class ExitController:
                 "pnl_pct": round(pnl_pct, 2),
                 "atr_multiplier": sig.atr_mult,
                 "entry_core_agree": pos.entry_core_agree,
+                "realtime_agree": sig.agree_count,
             }
             return ExitSignal(
                 should_exit=True,
@@ -756,6 +793,8 @@ class ExitController:
             base_tp1=self._base_tp1,
             base_tp2=self._base_tp2,
             base_trailing_gap=self._base_trailing_gap,
+            atr_mult_max=self._atr_mult_max,
+            trailing_gap_pct=self._trailing_gap_pct,
         )
 
         # ── P3-14 Fix: 每 tick 日志降为 DEBUG，避免日志淹没 ─────────────────
@@ -768,7 +807,7 @@ class ExitController:
         logger.debug(
             "EXIT CHECK [{}] elapsed={:.0f}s rem={:.0f}s | "
             "entry={:.4f} cur={:.4f} pnl={:+.1f}% | "
-            "sl={:.1f}% tp1={:.1f}% tp2={:.1f}% trailing_gap={:.3f} | "
+            "sl={:.1f}% tp1={:.1f}% tp2={:.1f}% gap_pct={:.1f}% | "
             "atr={:.4f} atr_mult={:.2f} | "
             "trend={:.0f} trend_mult={:.2f} | "
             "agree={}/6({}) rev={}/6 cvd_rev={} | "
@@ -777,7 +816,7 @@ class ExitController:
             elapsed_s, window_rem,
             pos.entry_price, current_price,
             pnl_pct if pnl_pct else 0.0,
-            sig.dynamic_sl, sig.dynamic_tp1, sig.dynamic_tp2, sig.trailing_gap,
+            sig.dynamic_sl, sig.dynamic_tp1, sig.dynamic_tp2, sig.trailing_gap_pct,
             sig.atr_value, sig.atr_mult,
             sig.trend_strength, sig.trend_mult,
             sig.agree_count, sig.agree_dir,
@@ -986,8 +1025,9 @@ class ExitController:
             ctx.on_exit_complete()
             ctx._pending_close = False
             pos._pending_close = False
-            pos._exit_retry_done = False
             pos.sell_retry_count = 0
+            # NOTE: Do NOT reset _exit_retry_done here — it must stay True once set
+            # so the retry branch can distinguish "first failure" from "already retried".
 
         if ctx.condition_id != pos.condition_id:
             logger.warning(

@@ -25,7 +25,7 @@ from loguru import logger
 from app.config import settings
 from app.models import Side
 from app.pm_client import PolymarketClient
-from app.runtime_config import get_config
+from app.runtime_config import get_config, _latest_lock
 from app.strategy.decision_logger import DecisionLogger
 from app.strategy.entry_controller import EntryController
 from app.strategy.exit_controller import ExitController
@@ -86,6 +86,11 @@ class SinglePositionStrategy:
         # ── Binance 数据缓存（缓变数据，避免每 tick 重复请求）────────────────
         self._http_cache: dict[str, tuple[float, float]] = {}  # (value, timestamp)
         self._http_cache_ttl: float = 30.0  # seconds
+        # Shared httpx client to avoid creating a new client per tick (reduces memory pressure)
+        self._http_client: httpx.AsyncClient = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
 
         # 清算热力图滚动桶（策略自维护，不依赖 indicators.py 的 WS）
         self._liq_buckets: dict[str, list[dict]] = {}
@@ -105,6 +110,7 @@ class SinglePositionStrategy:
             self._running = False
             self._prev_running = False
             if was:
+                await self._http_client.aclose()
                 logger.info("Strategy STOPPED")
             return was
 
@@ -429,7 +435,7 @@ class SinglePositionStrategy:
             }
 
         cfg = get_config()
-        self._latest = {
+        new_state = {
             "_type": "state",
             "strategy": "single_position",
             "now": datetime.now(timezone.utc).isoformat(),
@@ -466,101 +472,98 @@ class SinglePositionStrategy:
             # 实时指标（策略 tick 时预取计算，通过 /ws/live 和 /ws/indicators 推送）
             "indicators": dict(self._latest_indicators),
         }
+        # Thread-safe write: serialize the dict under lock so ws_live readers get a consistent snapshot
+        with _latest_lock:
+            self._latest = new_state
 
     # ── Binance 数据预取辅助 ──────────────────────────────────────────────
 
     async def _fetch_klines(self, symbol: str, limit: int = 500) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    "https://api.binance.com/api/v3/klines",
-                    params={"symbol": symbol, "interval": "1m", "limit": limit},
-                )
-                r.raise_for_status()
-                data = r.json()
-                return {
-                    "closes":  [float(row[4]) for row in data],
-                    "highs":   [float(row[2]) for row in data],
-                    "lows":    [float(row[3]) for row in data],
-                    "volumes": [float(row[5]) for row in data],
-                }
+            r = await self._http_client.get(
+                "https://api.binance.com/api/v3/klines",
+                params={"symbol": symbol, "interval": "1m", "limit": limit},
+            )
+            r.raise_for_status()
+            data = r.json()
+            return {
+                "closes":  [float(row[4]) for row in data],
+                "highs":   [float(row[2]) for row in data],
+                "lows":    [float(row[3]) for row in data],
+                "volumes": [float(row[5]) for row in data],
+            }
         except Exception:
             return None
 
     async def _fetch_funding(self, symbol: str) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(
-                    "https://fapi.binance.com/fapi/v1/premiumIndex",
-                    params={"symbol": symbol},
-                )
-                r.raise_for_status()
-                return float(r.json().get("lastFundingRate", 0))
+            r = await self._http_client.get(
+                "https://fapi.binance.com/fapi/v1/premiumIndex",
+                params={"symbol": symbol},
+            )
+            r.raise_for_status()
+            return float(r.json().get("lastFundingRate", 0))
         except Exception:
             return None
 
     async def _fetch_oi(self, symbol: str) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(
-                    "https://fapi.binance.com/fapi/v1/openInterest",
-                    params={"symbol": symbol},
-                )
-                r.raise_for_status()
-                return float(r.json().get("openInterest", 0))
+            r = await self._http_client.get(
+                "https://fapi.binance.com/fapi/v1/openInterest",
+                params={"symbol": symbol},
+            )
+            r.raise_for_status()
+            return float(r.json().get("openInterest", 0))
         except Exception:
             return None
 
     async def _fetch_obi(self, symbol: str) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(
-                    "https://api.binance.com/api/v3/depth",
-                    params={"symbol": symbol, "limit": 10},
-                )
-                r.raise_for_status()
-                data = r.json()
-                bids = data.get("bids", [])
-                asks = data.get("asks", [])
-                bv = sum(float(q) for _, q in bids)
-                av = sum(float(q) for _, q in asks)
-                obi = bv / av if av > 0 else 1.0
-                return {"bid_vol": bv, "ask_vol": av, "value": obi}
+            r = await self._http_client.get(
+                "https://api.binance.com/api/v3/depth",
+                params={"symbol": symbol, "limit": 10},
+            )
+            r.raise_for_status()
+            data = r.json()
+            bids = data.get("bids", [])
+            asks = data.get("asks", [])
+            bv = sum(float(q) for _, q in bids)
+            av = sum(float(q) for _, q in asks)
+            obi = bv / av if av > 0 else 1.0
+            return {"bid_vol": bv, "ask_vol": av, "value": obi}
         except Exception:
             return None
 
     async def _fetch_cvd(self, symbol: str) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    "https://api.binance.com/api/v3/aggTrades",
-                    params={"symbol": symbol, "limit": 500},
-                )
-                r.raise_for_status()
-                data = r.json()
-                delta = 0.0
-                for t in data:
-                    qty = float(t.get("q", 0))
-                    maker = t.get("m", True)
-                    delta += qty if not maker else -qty
-                return delta
+            r = await self._http_client.get(
+                "https://api.binance.com/api/v3/aggTrades",
+                params={"symbol": symbol, "limit": 500},
+            )
+            r.raise_for_status()
+            data = r.json()
+            delta = 0.0
+            for t in data:
+                qty = float(t.get("q", 0))
+                maker = t.get("m", True)
+                delta += qty if not maker else -qty
+            return delta
         except Exception:
             return None
 
     async def _fetch_spot_prices(self) -> tuple[float, float]:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                btc_r = await client.get(
-                    "https://api.binance.com/api/v3/ticker/price",
-                    params={"symbol": "BTCUSDT"},
-                )
-                eth_r = await client.get(
-                    "https://api.binance.com/api/v3/ticker/price",
-                    params={"symbol": "ETHUSDT"},
-                )
-                btc = float(btc_r.json().get("price", 0)) if btc_r.status_code == 200 else 0.0
-                eth = float(eth_r.json().get("price", 0)) if eth_r.status_code == 200 else 0.0
-                return btc, eth
+            btc_r = await self._http_client.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": "BTCUSDT"},
+            )
+            eth_r = await self._http_client.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": "ETHUSDT"},
+            )
+            btc = float(btc_r.json().get("price", 0)) if btc_r.status_code == 200 else 0.0
+            eth = float(eth_r.json().get("price", 0)) if eth_r.status_code == 200 else 0.0
+            return btc, eth
         except Exception:
             return 0.0, 0.0
 
@@ -661,7 +664,3 @@ class SinglePositionStrategy:
         await self.pm.close()
         if self._live_trader:
             self._live_trader.close()
-
-
-# 兼容旧名称
-ReverseThresholdTPStrategy = SinglePositionStrategy

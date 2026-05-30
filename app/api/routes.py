@@ -13,10 +13,11 @@ from loguru import logger
 
 from app.config import settings
 from app.database import async_session
-from app.models import Fill, Trade
+from app.models import Fill, Trade, User
 from app.runtime_config import get_config, get_creds, update_config
 from app.strategy.position_state import ExitReason
 from app.api.websocket import set_strategy_ref as _set_ws_strategy_ref
+from app.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -630,7 +631,7 @@ async def live_status():
 
 
 @router.post("/live/confirm")
-async def live_confirm():
+async def live_confirm(request: Request, current_user: User = Depends(get_current_user)):
     """
     Confirm intent to enable live trading. Required before setting live_mode=True
     via POST /api/config. Resets to False on every server restart.
