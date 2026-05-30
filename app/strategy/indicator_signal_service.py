@@ -823,15 +823,12 @@ class IndicatorSignalService:
         # ── Liquidation ────────────────────────────────────
         liq = _build_liquidation(self.asset, current_price)
 
-        # ── OI 变化率（使用滚动历史计算）──────────────────────────
+        # ── OI 变化率（使用滚动历史计算；append 由 get_indicators 统一处理）─
         oi_change = 0.0
         if oi_val and oi_val > 0:
             oi_h = self._oi_hist()
-            oi_h.append(float(oi_val))
-            if len(oi_h) > _MAX_OI_HISTORY:
-                oi_h.pop(0)
             if len(oi_h) >= 2:
-                prev_oi = oi_h[-2]
+                prev_oi = oi_h[-1]   # last committed entry
                 oi_change = (float(oi_val) - prev_oi) / prev_oi if prev_oi > 0 else 0.0
 
         # ── 计算 Core 6 ─────────────────────────────────────

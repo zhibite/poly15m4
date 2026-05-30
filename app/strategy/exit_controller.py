@@ -813,7 +813,7 @@ class ExitController:
             pos, sig, current_price, pnl_pct, now, mkt,
         )
         if signal_exit.should_exit:
-            self._log_gate_exit(pos.asset, pos.side.value, signal_exit, sig, pnl_pct)
+            self._log_gate_exit(pos.asset, pos.side.value, signal_exit, sig, pnl_pct, pos)
             return signal_exit
 
         # Gate 命中但选择持仓（HOLD）
@@ -846,6 +846,7 @@ class ExitController:
         signal_exit: ExitSignal,
         sig: RealtimeSignal,
         pnl_pct: float,
+        pos: "OpenPosition",
     ) -> None:
         """打印三重门退出时的详细信息。"""
         gate = signal_exit.reason.split("_")[0]  # GATE1 / GATE2 / GATE3
@@ -857,7 +858,7 @@ class ExitController:
             "atr_mult={:.2f} | {}",
             asset, pos_side, gate, pnl_pct,
             sig.agree_count,
-            getattr(sig, "entry_core_agree", 0),
+            pos.entry_core_agree,
             sig.atr_mult,
             detail,
         )
