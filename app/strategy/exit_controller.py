@@ -1000,9 +1000,20 @@ class ExitController:
         resolved_mkt = ctx.market
         override_exit = None
 
-        if reason in ("settle", "invalid_tokens"):
+        # Bug-1 fix: settle 路径使用 settle_up_wins 计算 exit price。
+        # UP 胜出 → UP token exit=1.0，DOWN token exit=0.0
+        # DOWN 胜出 → UP token exit=0.0，DOWN token exit=1.0
+        if reason == "settle" and settle_up_wins is not None:
+            override_exit = 1.0 if settle_up_wins else 0.0
+            logger.info(
+                "EXIT settle override [{}]: up_wins={}, override_exit={}",
+                asset, settle_up_wins, override_exit,
+            )
+        elif reason == "settle" and tp_trigger_exit_price is not None:
+            # 兜底：若 settle_up_wins 不可用，用传入的 tp_trigger_exit_price
             override_exit = tp_trigger_exit_price
-            resolved_mkt = pos.market
+        elif reason == "invalid_tokens":
+            override_exit = tp_trigger_exit_price
 
         tp_hit = getattr(pos, "tp_hit", None)
         try:

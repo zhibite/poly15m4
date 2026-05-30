@@ -705,7 +705,9 @@ class PositionManager:
                             total_sold_tokens=tokens_to_sell,
                             tp_trigger_exit_price=tp_trigger_exit_price,
                         )
-                    pnl_pct, pnl_usd = self._compute_pnl(pos, outcome.fill_price, tokens_to_sell)
+                    # Bug-4 fix: PnL 分母统一用 tokens_at_entry（入场总量），
+                    # 与全额平仓路径（_close_loop）保持一致。
+                    pnl_pct, pnl_usd = self._compute_pnl(pos, outcome.fill_price, tokens_at_entry)
                     pos._last_pnl_pct = pnl_pct
                     pos._last_pnl_usd = pnl_usd
                     return pnl_pct, pnl_usd

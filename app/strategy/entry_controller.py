@@ -481,7 +481,6 @@ class EntryController:
             logger.warning("ENTRY skip {}: balance {:.4f} < {:.4f}", asset, bal_micro / 1e6, actual_stake)
             return False
 
-        ctx._pending_position = None
         try:
             result = await self._live_trader.buy_token(
                 token_id, stake, price, fee_rate_bps,
@@ -500,7 +499,6 @@ class EntryController:
                 )
             return False
 
-        ctx._pending_position = None
         if result and result.success:
             await self._on_entry_success(
                 asset, ctx, side, direction, elapsed,
@@ -510,7 +508,6 @@ class EntryController:
             )
             return True
         else:
-            ctx._pending_position = None
             err = result.error if result else "unknown"
             if not await self._retry_mgr.schedule(asset, stake=stake, direction=direction, price=price):
                 logger.error(

@@ -89,9 +89,12 @@ class RetryManager:
         direction: str,
         price: float,
     ) -> bool:
+        # Bug-10 fix: reduce backoff from 10s to 5s multiplier.
+        # With multiplier=5: retries at 5/10/15s → total wait 30s (was 60s).
+        # This prevents exhausting retries mid-window during slow FOK fills.
         MAX_RETRIES = 3
-        MAX_BACKOFF_SEC = 10.0  # cap at 10s so max total wait = 10+20+30 = 60s
-        BACKOFF_MULTIPLIER = 10.0
+        MAX_BACKOFF_SEC = 5.0   # cap at 5s → max total wait = 5+10+15 = 30s (was 10+20+30 = 60s)
+        BACKOFF_MULTIPLIER = 5.0
         state = self._state.setdefault(key, {
             "stake": stake,
             "direction": direction,

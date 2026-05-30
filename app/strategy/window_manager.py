@@ -39,9 +39,7 @@ class WindowManager:
                 window_end=datetime.min.replace(tzinfo=timezone.utc),
             )
             for s in symbols
-        }
-        self._prev_condition_id: Dict[str, str] = {}
-
+            }
     # ── 公开 API ────────────────────────────────────────────────────────────────
 
     def get(self, asset: str) -> Optional[WindowContext]:

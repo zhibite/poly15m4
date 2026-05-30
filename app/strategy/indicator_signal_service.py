@@ -823,15 +823,15 @@ class IndicatorSignalService:
         # ── Liquidation ────────────────────────────────────
         liq = _build_liquidation(self.asset, current_price)
 
-        # ── OI 变化率（使用滚动历史计算；append 由 get_indicators 统一处理）─
-        oi_change = 0.0
+        # Bug-3 fix: append OI to history BEFORE calling _calc_advanced_filters.
+        # _oi_hist must be populated so that oi_change is computed correctly
+        # from the first call onward (not always 0).
         if oi_val and oi_val > 0:
             oi_h = self._oi_hist()
-            if len(oi_h) >= 2:
-                prev_oi = oi_h[-1]   # last committed entry
-                oi_change = (float(oi_val) - prev_oi) / prev_oi if prev_oi > 0 else 0.0
-
-        # ── 计算 Core 6 ─────────────────────────────────────
+            oi_h.append(float(oi_val))
+            if len(oi_h) > _MAX_OI_HISTORY:
+                oi_h.pop(0)
+        # OI change is read by _calc_advanced_filters from _oi_hist()
         core = self._calc_core_signals(
             closes=closes,
             highs=highs,
@@ -1025,16 +1025,6 @@ class IndicatorSignalService:
                 pivot_sig = "above"
             elif current_price < pivot["low"] * 1.0005:
                 pivot_sig = "below"
-
-        # OI 变化率
-        oi_change = 0.0
-        oi_h = self._oi_hist()
-        if oi_val and oi_val > 0:
-            oi_h.append(float(oi_val))
-            if len(oi_h) > _MAX_OI_HISTORY:
-                oi_h.pop(0)
-            if len(oi_h) >= 2 and oi_h[-2] > 0:
-                oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
 
         # CVD Z-score 已在 _cvd_z_score() 调用时（_calc_core_signals 路径）追加到基准，
         # 此处不再重复追加，避免同一 tick 内追加两次导致基准消耗加速。

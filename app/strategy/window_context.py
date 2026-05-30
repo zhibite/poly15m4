@@ -59,9 +59,6 @@ class WindowContext:
     # 当前窗口内的持仓
     position: Optional["OpenPosition"] = field(default=None)
 
-    # 入场占位符
-    _pending_position: Optional["OpenPosition"] = field(default=None)
-
     # 平仓占位符
     _pending_close: bool = field(default=False)
 
@@ -76,7 +73,7 @@ class WindowContext:
 
     @property
     def has_position(self) -> bool:
-        return self.position is not None or self._pending_position is not None
+        return self.position is not None
 
     @property
     def is_traded(self) -> bool:
@@ -101,7 +98,6 @@ class WindowContext:
         if self.position is not None:
             self.position._is_orphan_position = False
         self.position = None
-        self._pending_position = None
         self._pending_close = False
         self.state = PositionState.NO_POSITION
 
@@ -120,7 +116,6 @@ class WindowContext:
         if self.position is not None:
             self.position._is_orphan_position = False
         self.position = None
-        self._pending_position = None
         self._pending_close = False
         self.is_fresh = True
 

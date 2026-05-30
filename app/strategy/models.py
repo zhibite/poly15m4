@@ -36,7 +36,7 @@ class MarketInfo:
 
     # ── ATR 计算用：最近 N 个 tick 的价格快照 ──────────────────────────
     # 由 exit_controller._record_price_tick 写入，每次 tick 更新
-    _price_history: list = None
+    _price_history: list = field(default_factory=list)
 
 
 @dataclass

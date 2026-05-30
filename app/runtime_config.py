@@ -11,6 +11,7 @@ from app.config import settings
 
 _ENV_PATH: str | None = None
 _creds_lock = threading.Lock()
+_config_lock = threading.Lock()
 
 
 def _init_env_path():
@@ -153,16 +154,18 @@ _config_runtime_version: int = 0
 def get_config() -> dict:
     global _config_cache, _config_cache_version
     global _config_runtime_version
-    if _config_cache is None or _config_runtime_version != _config_cache_version:
-        _config_cache = copy.deepcopy(dict(_runtime))
-        _config_cache_version = _config_runtime_version
-    return _config_cache
+    with _config_lock:
+        if _config_cache is None or _config_runtime_version != _config_cache_version:
+            _config_cache = copy.deepcopy(dict(_runtime))
+            _config_cache_version = _config_runtime_version
+        return copy.deepcopy(_config_cache)
 
 
 def update_config(patch: dict, *, env_path: str | None = None) -> dict:
     global _config_runtime_version
-    _runtime.update(patch)
-    _config_runtime_version += 1
+    with _config_lock:
+        _runtime.update(patch)
+        _config_runtime_version += 1
     target = env_path or _init_env_path()
     if target:
         try:

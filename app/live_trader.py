@@ -1433,10 +1433,13 @@ class LiveTrader:
                 ),
             )
             raw = int(resp.get("balance", 0) or 0)
+            # Bug-8 fix: quantize to the market's actual tick_size (not a fixed 0.00000001).
+            # Polymarket tokens have tick_size=0.0001; using 8-decimal quantization
+            # introduced rounding errors at high token counts (>1000 tokens → ~0.0001 error).
+            ts_str = await self._get_tick_size(token_id)
+            ts_prec = Decimal(ts_str)
             balance = float(
-                (Decimal(raw) / Decimal("1_000_000")).quantize(
-                    Decimal("0.00000001"), rounding=ROUND_DOWN
-                )
+                (Decimal(raw) / Decimal("1_000_000")).quantize(ts_prec, rounding=ROUND_DOWN)
             )
             return balance
         except Exception as exc:
@@ -1462,6 +1465,16 @@ class LiveTrader:
 
     async def redeem_open_positions_async(self, size_threshold: float = 0.01, condition_id: Optional[str] = None) -> dict:
         """Async entry point — runs _redeem_sync via thread executor so web3 blocking calls don't block the event loop."""
+        # Bug-5 fix: reject None condition_id to prevent accidentally redeeming all windows.
+        # All callers (skip_record path, close_position, _close_loop dust path) must pass
+        # the specific condition_id to scope redemption to the current window only.
+        if condition_id is None:
+            logger.error(
+                "redeem_open_positions_async called with condition_id=None — "
+                "rejecting to prevent cross-window redemption sweep. "
+                "Callers must always pass the target condition_id.",
+            )
+            return {"checked": 0, "redeemed": 0, "total_usdc": 0.0, "errors": ["condition_id is required"]}
         return await self._run(self._redeem_sync, size_threshold, condition_id)
 
     def _redeem_sync(self, size_threshold: float, condition_id: Optional[str] = None) -> dict:
