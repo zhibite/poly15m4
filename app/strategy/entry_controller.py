@@ -34,6 +34,10 @@ from app.strategy.indicator_signal_service import (
 """
 entry_controller.py — 入场控制器（单单持仓版）
 """
+
+
+@dataclass
+class EntryParams:
     """入场参数包"""
 
     base_usdc: float = 4.0           # 基准仓位（100% 时使用）
