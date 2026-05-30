@@ -125,22 +125,22 @@ class RealtimeSignal:
     持仓期的实时信号状态。
     由 check_exit 调用时根据传入的 indicators dict 计算。
     """
-    agree_count: int       # Core 6 同向数量（0~6）
-    agree_dir: str         # "UP" / "DOWN" / "MIXED"
-    reverse_count: int     # Core 6 反向数量（0~6）
+    agree_count: int = 0          # Core 6 同向数量（0~6）
+    agree_dir: str = ""           # "UP" / "DOWN" / "MIXED"
+    reverse_count: int = 0        # Core 6 反向数量（0~6）
     # ATR
-    atr_value: float       # 概率 ATR（0~1）
-    atr_mult: float        # 波动倍数（1.0~3.0）
-    trend_strength: float  # 趋势强度（0~100）
-    trend_mult: float      # 趋势乘数（极强>70→1.2，弱<30→0.8）
+    atr_value: float = 0.0        # 概率 ATR（0~1）
+    atr_mult: float = 1.0         # 波动倍数（1.0~3.0）
+    trend_strength: float = 0.0    # 趋势强度（0~100）
+    trend_mult: float = 1.0        # 趋势乘数（极强>70→1.2，弱<30→0.8）
     # CVD 反向（P0-3: "最强单信号"，持仓期若 CVD 反向 Core 方向须立即离场）
-    cvd_reverse: bool = False   # CVD Z>1σ 且方向与持仓相反
-    cvd_z: float = 0.0          # CVD Z-score
+    cvd_reverse: bool = False     # CVD Z>1σ 且方向与持仓相反
+    cvd_z: float = 0.0            # CVD Z-score
     # 动态阈值
-    dynamic_sl: float      # 动态止损（负值）
-    dynamic_tp1: float     # 动态 TP1
-    dynamic_tp2: float     # 动态 TP2
-    trailing_gap: float    # 移动止损间距
+    dynamic_sl: float = 0.0       # 动态止损（负值）
+    dynamic_tp1: float = 0.0      # 动态 TP1
+    dynamic_tp2: float = 0.0      # 动态 TP2
+    trailing_gap: float = 0.0     # 移动止损间距
     # 三重门命中结果
     gate1_triggered: bool = False
     gate1_action: str = ""
