@@ -586,7 +586,9 @@ class IndicatorSignalService:
             fund_reason = f"资金费率={funding_val*100:.3f}%<-0.05%，空头给多头，趋势延续，做DOWN"
             fund_agree = (primary_dir == SignalDir.DOWN)
         else:
+            fund_dir = SignalDir.SKIP
             fund_reason = f"资金费率={funding_val*100:.3f}%，中性"
+            fund_agree = False
 
         # ── CVD ───────────────────────────────────────────────
         cvd_dir = SignalDir.SKIP
