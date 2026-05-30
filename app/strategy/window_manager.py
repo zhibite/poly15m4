@@ -149,10 +149,17 @@ class WindowManager:
 
         ctx.reset_for_new_window()
 
-        # 窗口切换时无条件重置 _window_skipped。
+        # 窗口切换时无条件重置 _window_skipped 和正确 elapsed 值。
         # Defensively guard against None in case initialization order changes.
         if self._entry_ctrl is not None:
             self._entry_ctrl.reset_window_skipped(ctx.asset)
+            # 新窗口开启时的真实 elapsed = now - window_start
+            # 注意：mkt.window_start 已经是 UTC aware datetime
+            now = datetime.now(timezone.utc)
+            fresh_elapsed = (now - mkt.window_start).total_seconds()
+            if fresh_elapsed < 0:
+                fresh_elapsed = 0.0
+            self._entry_ctrl.set_fresh_elapsed(ctx.asset, fresh_elapsed)
 
         if prev_id and prev_id != mkt.condition_id:
             logger.info(

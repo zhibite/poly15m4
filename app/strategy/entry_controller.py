@@ -118,6 +118,12 @@ class EntryController:
         self._window_skipped: dict[str, bool] = {}
         self._window_skipped_lock = asyncio.Lock()
 
+        # 在窗口切换时存储正确的 elapsed 值（用于 is_fresh 跳过逻辑）。
+        # 原因：ctx.elapsed() 在新窗口的第一个 tick 仍使用旧的 datetime.min
+        # 作为 window_start，导致返回极大的值并触发 window_closed。
+        # 正确值在 _on_new_window 时通过 discover_market 的 window_start 计算。
+        self._fresh_elapsed: dict[str, float] = {}
+
         self._signal_svc: dict[str, IndicatorSignalService] = (
             signal_svc if signal_svc is not None
             else {a: IndicatorSignalService(a) for a in ("BTC", "ETH")}
@@ -171,6 +177,10 @@ class EntryController:
         """窗口切换时重置跳过标记"""
         self._window_skipped[asset] = False
 
+    def set_fresh_elapsed(self, asset: str, elapsed: float) -> None:
+        """窗口切换时存储正确的 elapsed 值（供 is_fresh 逻辑使用）"""
+        self._fresh_elapsed[asset] = elapsed
+
     # ── 计算止盈止损阈值（per trading-guide.md）──────────────────────────
 
     def _calc_stop_levels(self, entry_price: float, pos: OpenPosition) -> None:
@@ -219,13 +229,16 @@ class EntryController:
         if not mkt:
             return EntryResult(reason="no_market")
 
-        elapsed = ctx.elapsed()
-        p = self._params
-
-        # 新窗口的第一个 tick 跳过 elapsed cutoff 检查
         is_fresh = getattr(ctx, "is_fresh", False)
         if is_fresh:
             ctx.is_fresh = False
+
+        # 在窗口切换的第一个 tick，使用 _on_new_window 时计算的正确 elapsed 值。
+        # 原因：ctx.elapsed() 仍使用旧 context 的 window_start（datetime.min 或上一个窗口），
+        # 会返回错误的大值（如 ~86400s），导致 entry_late_cutoff_elapsed_sec 检查失败。
+        elapsed = self._fresh_elapsed.get(asset, ctx.elapsed()) if is_fresh else ctx.elapsed()
+
+        p = self._params
 
         # 超过入场截止时间：整个窗口禁止开单
         if not is_fresh and elapsed >= p.entry_late_cutoff_elapsed_sec - 1e-9:
@@ -289,7 +302,7 @@ class EntryController:
 
         mode_label = "LIVE" if p.live_mode else "DRY"
         logger.info(
-            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/5 direction={} price={:.4f} action={}",
+            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/6 direction={} price={:.4f} action={}",
             mode_label, asset, elapsed, sig.core_agree,
             sig.direction_label,
             sig.up_mid if sig.direction == SignalDir.UP else sig.down_mid,
@@ -303,7 +316,7 @@ class EntryController:
 
         if sig.core_agree < p.core_agree_threshold:
             logger.info(
-                "check_entry [{}] SKIP: Core 共识 {}/5 < {}/5（不足）",
+                "check_entry [{}] SKIP: Core 共识 {}/6 < {}/6（不足）",
                 asset, sig.core_agree, p.core_agree_threshold,
             )
             return EntryResult(reason="no_signal", signal_result=sig)
