@@ -179,8 +179,13 @@ FUNDING_BULLISH_THRESHOLD:  float = -0.0005  # < -0.05% → 做 UP
 # Funding 极端 REDUCE 阈值（覆盖 0.08%~0.1% 区间）
 FUNDING_EXTREME_REDUCE_THRESHOLD: float = 0.0008   # > +0.08%
 
-# OI 变化阈值
-OI_CHANGE_SIGNIFICANT: float = 0.05   # 5% 变化视为显著
+# OI 变化阈值（使用窗口期变化率，而非 tick-to-tick）
+# 计算方式：(当前OI - 窗口起始OI) / 窗口起始OI
+# Binance openInterest 是累计值，tick-to-tick 变化极小
+OI_CHANGE_SIGNIFICANT: float = 0.10   # 10% 窗口期变化视为显著
+
+# OI 历史中第一个值作为窗口起始基准（固定起点）
+OI_WINDOW_START_OFFSET: int = 0  # 始终使用历史中的第一个值作为基准
 
 # 布林带参数
 BBANDS_PERIOD: int = 20        # 中轨周期（SMA）
@@ -641,14 +646,19 @@ class IndicatorSignalService:
         else:
             obi_reason = f"OBI={obi_val:.3f}，订单簿均衡"
 
-        # ── OI（P3-13 Fix: 直接从自身历史计算 OI 变化率）────────────────
-        # 与 get_indicators 使用完全相同的计算路径，避免路径不一致
+        # ── OI（Bug修复: 使用窗口起始 OI 作为基准）─────────────────────
+        # Binance openInterest 是累计值，tick-to-tick 变化极小。
+        # 改用窗口起始时的 OI（历史中的第一个值）作为基准，计算窗口期变化率。
         oi_dir = SignalDir.SKIP
         oi_agree = False
         oi_reason = ""
         oi_h = self._oi_hist()
         oi_change = 0.0
-        if len(oi_h) >= 2 and oi_h[-2] > 0:
+        if len(oi_h) >= 2 and oi_h[0] > 0:
+            # 使用窗口起始 OI 作为基准，计算窗口期内累计变化率
+            oi_change = (oi_h[-1] - oi_h[0]) / oi_h[0]
+        elif len(oi_h) >= 2 and oi_h[-2] > 0:
+            # 回退：如果首值无效，用相邻 tick 差值（仍能捕捉大幅波动）
             oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
 
         if len(closes) >= 2 and abs(oi_change) >= OI_CHANGE_SIGNIFICANT:
@@ -1048,13 +1058,16 @@ class IndicatorSignalService:
         cvd_z_ro = self._cvd_z_score_ro(abs(cvd_val)) if cvd_val != 0.0 else 0.0
 
         # OI history — append current value before reading for change calculation
+        # Bug修复: 使用窗口起始 OI（历史中的第一个值）作为基准，计算窗口期变化率
         oi_h = self._oi_hist()
         if oi_val and oi_val > 0:
             oi_h.append(float(oi_val))
             if len(oi_h) > _MAX_OI_HISTORY:
                 oi_h.pop(0)
         oi_change = 0.0
-        if len(oi_h) >= 2 and oi_h[-2] > 0:
+        if len(oi_h) >= 2 and oi_h[0] > 0:
+            oi_change = (oi_h[-1] - oi_h[0]) / oi_h[0]
+        elif len(oi_h) >= 2 and oi_h[-2] > 0:
             oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
 
         return {
