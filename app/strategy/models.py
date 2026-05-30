@@ -3,7 +3,7 @@ models.py — 数据模型
 仅包含数据结构，不含业务逻辑。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
