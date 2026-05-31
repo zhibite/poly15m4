@@ -67,8 +67,6 @@ class EntryParams:
     entry_price_max_tp: float = 0.60
     # 止损基础值（概率%）
     sl_base_pct: float = -10.0
-    # 移动止盈激活阈值（概率%）
-    trailing_activate_pct: float = 70.0
 
 
 @dataclass
@@ -155,7 +153,6 @@ class EntryController:
         p.entry_price_min_tp = float(cfg.get("entry_price_min_tp", 0.20))
         p.entry_price_max_tp = float(cfg.get("entry_price_max_tp", 0.60))
         p.sl_base_pct = float(cfg.get("sl_base_pct", -10.0))
-        p.trailing_activate_pct = float(cfg.get("trailing_activate_pct", 70.0))
 
         for sym in ("BTC", "ETH"):
             if sym not in self._entry_locks:
@@ -185,15 +182,16 @@ class EntryController:
 
     def _calc_stop_levels(self, entry_price: float, pos: OpenPosition) -> None:
         """
-        根据 trading-guide.md 止盈止损策略计算阈值，直接写入 pos。
+        根据入场价计算止盈止损阈值，写入 pos。
 
-        止盈阈值（tp_pct）：
-        tp_pct 是信息值，反映"若价格继续上涨到 tp_pct 概率时的理论目标"。
-        实际触发由追踪止损兜底：
-        - +15% 概率移动 → 第一阶段止盈 50%
-        - +30% 概率移动 → 第二阶段止盈 30%（剩余仓位的 60%）
-        - 追踪止损在 70% 概率激活，为剩余仓位提供动态保护
-        - 概率接近 85% 时由追踪止损线兜底持有到期
+        止盈阈值（tp_pct）：基于入场价的线性映射
+          TP = tp_base_pct + tp_range_pct × (entry_price_max_tp - entry_price) / range
+          入场价越低 → scale 越大 → TP 目标越高（低价入、高目标）
+
+        止损阈值（sl_pct）：固定值 sl_base_pct
+          亏损达到 sl_base_pct 时进入信号确认检查（见 exit_controller）
+
+        不含追踪止损逻辑：TP 触发时检查信号同向性，同向则继续持有，否则止盈退出。
         """
         p = self._params
         price_range = p.entry_price_max_tp - p.entry_price_min_tp
@@ -207,10 +205,7 @@ class EntryController:
 
         pos.tp_pct = tp_pct
         pos.sl_pct = p.sl_base_pct
-        pos.trailing_stop_activate_pct = p.trailing_activate_pct
-        pos.trailing_stop_pct = 0.0
-        pos.trailing_stop_activated = False
-        # 锚点价：用于追踪止损和后续 PnL 参考，入场时等于有效入场价
+        # 锚点价：入场时等于有效入场价，用于 PnL 百分比的基准计算
         pos.anchor_price = entry_price
 
     # ── 入场决策 ────────────────────────────────────────────────────────
@@ -636,6 +631,7 @@ class EntryController:
         )
 
         # 计算止盈止损阈值（直接写入 pos）
+        # 用 effective_entry_price（含手续费影响）作为 TP 计算基准，最接近实际盈亏
         self._calc_stop_levels(fp, pos)
 
         sig_meta = getattr(ctx, "entry_signal_meta", None) or {}

@@ -42,7 +42,7 @@ class ExitReason:
     TAKE_PROFIT_2    = "第二止盈"     # +30% 第二阶段止盈（剩余仓位的 60%）
     STOP_LOSS        = "止损"
     STOP_LOSS_EARLY  = "信号早平"     # Gate1：信号反转提前止损
-    TRAILING_EXIT    = "移动止损离场"  # Gate3：跟踪线被触及
+    GATE3_EXIT        = "信号减弱退出"  # Gate3：信号减弱且盈利退出
     SETTLE           = "窗口结算"
     INVALID_POSITION = "无效持仓数量"
 
@@ -74,7 +74,7 @@ class ExitReason:
     KIND_TP2         = "第二止盈"
     KIND_SL          = "止损"
     KIND_SL_EARLY    = "信号早平"
-    KIND_TRAILING    = "移动止损离场"
+    KIND_GATE3       = "信号减弱退出"
     KIND_SL_FULL     = "固定止损（全部）"
 
     # ── 辅助方法 ──────────────────────────────────────────────────────

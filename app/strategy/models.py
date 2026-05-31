@@ -71,12 +71,6 @@ class OpenPosition:
     tp_pct: float = 0.0
     # 止损阈值（负值，如 -10.0 表示 -10%）
     sl_pct: float = 0.0
-    # 移动止盈：激活阈值（概率%），达到此概率后激活跟踪
-    trailing_stop_activate_pct: float = 70.0
-    # 移动止盈跟踪线（概率%），激活后跟随市场上移
-    trailing_stop_pct: float = 0.0
-    # 移动止盈是否已激活
-    trailing_stop_activated: bool = False
 
     # ── 入场信息 ────────────────────────────────────────────────────
     entry_core_agree: int = 0

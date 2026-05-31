@@ -528,7 +528,7 @@ function validateConfig(body) {
 async function loadConfig() {
   const d = await api('/api/config');
   if (!d) return;
-  const boolFields = new Set(['live_mode', 'asset_btc_enabled', 'asset_eth_enabled', 'signal_trailing_stop_enabled']);
+  const boolFields = new Set(['live_mode', 'asset_btc_enabled', 'asset_eth_enabled']);
   const numFields = [
     'market_interval_slug',
     'market_duration_sec',

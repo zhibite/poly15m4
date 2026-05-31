@@ -428,8 +428,6 @@ class SinglePositionStrategy:
                 "unrealized_pnl": round(pos.tokens_bought * cur_slip - pos.actual_cost_usdc, 4),
                 "take_profit_pct": pos.tp_pct,
                 "stop_loss_pct": pos.sl_pct,
-                "trailing_stop_activated": getattr(pos, "trailing_stop_activated", False),
-                "trailing_stop_pct": getattr(pos, "trailing_stop_pct", 0.0) * 100,
                 "entry_core_agree": pos.entry_core_agree,
                 "mid": cur,
             }
@@ -451,7 +449,6 @@ class SinglePositionStrategy:
             },
             "exit": {
                 "fixed_stop_loss_pct": self.signal_fixed_stop_loss_pct,
-                "trailing_activate_pct": float(cfg.get("trailing_activate_pct", 70.0)),
             },
             "markets": {
                 a: {

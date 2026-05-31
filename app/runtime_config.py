@@ -101,21 +101,17 @@ _runtime: dict = {
     "core_agree_threshold":           int(float(_env("CORE_AGREE_THRESHOLD", "3"))),
     "core_agree_standard":           int(float(_env("CORE_AGREE_STANDARD", "3"))),
 
-    # 止盈止损（per trading-guide.md）
-    # TP = tp_base + tp_range * (entry_price_max - entry) / range
-    "tp_base_pct":                   float(_env("TP_BASE_PCT", "65.0")),
-    "tp_range_pct":                 float(_env("TP_RANGE_PCT", "20.0")),
-    "entry_price_min_tp":           float(_env("TP_ENTRY_PRICE_MIN", "0.20")),
-    "entry_price_max_tp":           float(_env("TP_ENTRY_PRICE_MAX", "0.60")),
-    "sl_base_pct":                  float(_env("SL_BASE_PCT", "-10.0")),
-    # 动态阈值基础值（exit_controller._compute_realtime_signal 使用）
-    "tp1_base_pct":                 float(_env("TP1_BASE_PCT", "8.0")),
-    "tp2_base_pct":                 float(_env("TP2_BASE_PCT", "20.0")),
-    "trailing_gap_base":            float(_env("TRAILING_GAP_BASE", "0.20")),
-    "trailing_activate_pct":         float(_env("TRAILING_ACTIVATE_PCT", "70.0")),
-    "atr_mult_max":                  float(_env("ATR_MULT_MAX", "2.0")),
-    # 移动止损回撤比例（入场价回撤多少触发止损，如 0.25 表示入场价回撤 25%）
-    "trailing_gap_pct":               float(_env("TRAILING_GAP_PCT", "25.0")),
+    # 止盈（基于入场价的动态 TP：入场价越低 → TP 目标越高）
+    # 公式：dyn_tp = tp_high_min + (tp_high_max - tp_high_min) * t
+    #       其中 t = (entry_clamped - tp_entry_min) / (tp_entry_max - tp_entry_min)
+    # 例：tp_high_min=30 / tp_high_max=10 / tp_entry_min=0.2 / tp_entry_max=0.6
+    #       入场 0.2 → t=0 → TP=30%  |  入场 0.6 → t=1 → TP=10%
+    "tp_high_min":                 float(_env("TP_HIGH_MIN", "30.0")),
+    "tp_high_max":                 float(_env("TP_HIGH_MAX", "10.0")),
+    "tp_entry_min":                float(_env("TP_ENTRY_MIN", "0.20")),
+    "tp_entry_max":                float(_env("TP_ENTRY_MAX", "0.60")),
+    # 止损
+    "sl_base_pct":                 float(_env("SL_BASE_PCT", "-10.0")),
 }
 
 _ENV_KEYS: dict[str, str] = {
@@ -145,13 +141,11 @@ _ENV_KEYS: dict[str, str] = {
     "tp_range_pct":                  "TP_RANGE_PCT",
     "entry_price_min_tp":             "TP_ENTRY_PRICE_MIN",
     "entry_price_max_tp":             "TP_ENTRY_PRICE_MAX",
-    "sl_base_pct":                   "SL_BASE_PCT",
-    "tp1_base_pct":                 "TP1_BASE_PCT",
-    "tp2_base_pct":                 "TP2_BASE_PCT",
-    "trailing_gap_base":            "TRAILING_GAP_BASE",
-    "trailing_activate_pct":          "TRAILING_ACTIVATE_PCT",
-    "atr_mult_max":                    "ATR_MULT_MAX",
-    "trailing_gap_pct":               "TRAILING_GAP_PCT",
+    "sl_base_pct":               "SL_BASE_PCT",
+    "tp_high_min":              "TP_HIGH_MIN",
+    "tp_high_max":              "TP_HIGH_MAX",
+    "tp_entry_min":             "TP_ENTRY_MIN",
+    "tp_entry_max":             "TP_ENTRY_MAX",
 }
 
 # 缓存上次返回的深拷贝，仅当 _runtime 实际更新后才重新生成。

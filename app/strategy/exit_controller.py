@@ -3,11 +3,11 @@ exit_controller.py — 退出控制器（单单持仓版，三重门信号辅助
 
 三重门逻辑：
   Gate 1（信号反向早平）：持仓方向与实时 Core 6 共识反向 ≥ 4/6 → 立即离场
-  Gate 2（信号续持）：    TP 阈值触发但实时信号同向 ≥ 4/6 → 跳过止盈继续持仓
-  Gate 3（移动止损）：    概率触发或信号反转时激活，跟随市场移动
+  Gate 2（信号续持）：    TP 阈值触发但实时信号同向 ≥ 3/6 → 跳过止盈继续持仓
+  Gate 3（信号减弱止盈）：盈利状态下信号减弱（< 3/6）→ 止盈退出
 
 日志策略：
-  - INFO：三重门任一命中时（续持 / 早平 / 移动止损激活）
+  - INFO：三重门任一命中时（续持 / 早平 / 信号减弱退出）
   - INFO：每次 check_exit 调用时（记录完整决策上下文，便于回测分析）
   - DEBUG：阈值计算过程（仅需要深入调试时启用）
 """
@@ -130,18 +130,13 @@ class RealtimeSignal:
     reverse_count: int = 0        # Core 6 反向数量（0~6）
     # ATR
     atr_value: float = 0.0        # 概率 ATR（0~1）
-    atr_mult: float = 1.0         # 波动倍数（1.0~3.0）
-    trend_strength: float = 0.0    # 趋势强度（0~100）
-    trend_mult: float = 1.0        # 趋势乘数（极强>70→1.2，弱<30→0.8）
+    atr_mult: float = 1.0         # 波动倍数（1.0~3.0），仅用于 SL 自适应
+    # CVD 反向（P0-3: "最强单信号"，持仓期若 CVD 反向 Core 方向须立即离场）
     # CVD 反向（P0-3: "最强单信号"，持仓期若 CVD 反向 Core 方向须立即离场）
     cvd_reverse: bool = False     # CVD Z>1σ 且方向与持仓相反
     cvd_z: float = 0.0            # CVD Z-score
     # 动态阈值
-    dynamic_sl: float = 0.0       # 动态止损（负值）
-    dynamic_tp1: float = 0.0      # 动态 TP1
-    dynamic_tp2: float = 0.0      # 动态 TP2
-    trailing_gap: float = 0.0     # 移动止损间距（绝对值，基于入场价 × trailing_gap_pct）
-    trailing_gap_pct: float = 25.0  # 移动止损回撤百分比（0~100）
+    dynamic_tp: float = 0.0       # 止盈阈值（基于入场价的固定 %）
     # 三重门命中结果
     gate1_triggered: bool = False
     gate1_action: str = ""
@@ -152,84 +147,6 @@ class RealtimeSignal:
     gate3_triggered: bool = False
     gate3_action: str = ""
     gate3_reason: str = ""
-    # 本次决策
-    decision: str = "HOLD"  # HOLD / EXIT_NOW / TP1 / TP2 / TRAILING
-
-
-def _compute_trend_strength(indicators: dict | None, pos_side: Side) -> tuple[float, float]:
-    """
-    计算趋势强度（0~100）和趋势乘数。
-
-    趋势强度基于：
-      - RSI 偏离中性程度（50）
-      - MACD 柱状图动能
-      - Core 6 共识数量（realtime_agree）
-      - 趋势持续性（RSI 历史趋势）
-
-    趋势乘数（trend_mult）：
-      - 极强（>70）：TP 目标 +20%，移动止损扩大 1.5×
-      - 强（50~70）：标准行为（×1.0）
-      - 中（30~50）：TP 目标 -10%，移动止损收紧 0.85×
-      - 弱（<30）：TP 目标 -20%，移动止损收紧 0.75×
-
-    Returns: (trend_strength, trend_mult)
-    """
-    if indicators is None:
-        return 50.0, 1.0
-
-    # 1. RSI 偏离（权重 25%，偏离越大强度越高）
-    ind_rsi = indicators.get("rsi", {})
-    rsi_val = float(ind_rsi.get("value", 50.0))
-    # 偏离程度：0（=50）→ 50（=0 or 100）
-    rsi_dev = abs(rsi_val - 50.0) * 2.0  # 0~100
-
-    # 2. MACD 动能（权重 20%，histogram 与价格方向一致则强）
-    ind_macd = indicators.get("macd", {})
-    macd_hist_list = ind_macd.get("histogram", [])
-    macd_momentum = 0.0
-    if macd_hist_list:
-        recent = macd_hist_list[-3:]  # 最近3个histogram
-        if pos_side == Side.UP:
-            macd_momentum = sum(min(h, 0.01) for h in recent) / 3 * 100  # 正值表示 UP 动能
-        else:
-            macd_momentum = sum(max(h, -0.01) for h in recent) / 3 * 100 * -1
-    macd_score = max(0.0, min(macd_momentum, 100.0))
-
-    # 3. 布林带位置（权重 15%，触及边缘则强）
-    ind_bb = indicators.get("bbands", {})
-    bb_sig = ind_bb.get("signal", "within")
-    bb_score = 80.0 if bb_sig in ("upper_touch", "lower_touch") else 40.0
-
-    # 4. VWAP 偏离（权重 15%，价格显著偏离 VWAP 表示趋势强）
-    ind_vwap = indicators.get("vwap", {})
-    vwap_sig = ind_vwap.get("signal", "at")
-    vwap_score = 80.0 if vwap_sig in ("above", "below") else 30.0
-
-    # 5. Core 6 共识数量（权重 25%，已在 _compute_realtime_signal 中计算）
-    # 通过 RSI/macd/vwap 等指标间接反映，此处取 RSI 偏离和 MACD 动能的组合
-    core_score = (rsi_dev * 0.5 + macd_score * 0.5)  # 已反映在 rsi_dev 和 macd_score 中
-
-    # 综合趋势强度（加权平均）
-    trend_strength = (
-        rsi_dev * 0.25 +
-        macd_score * 0.20 +
-        bb_score * 0.15 +
-        vwap_score * 0.15 +
-        core_score * 0.25
-    )
-    trend_strength = max(0.0, min(trend_strength, 100.0))
-
-    # 趋势乘数
-    if trend_strength > 70:
-        trend_mult = 1.2
-    elif trend_strength >= 50:
-        trend_mult = 1.0
-    elif trend_strength >= 30:
-        trend_mult = 0.85
-    else:
-        trend_mult = 0.75
-
-    return trend_strength, trend_mult
 
 
 def _compute_realtime_signal(
@@ -237,29 +154,24 @@ def _compute_realtime_signal(
     pos_side: Side,
     mkt=None,
     *,
-    base_sl: float = -10.0,
-    base_tp1: float = 8.0,
-    base_tp2: float = 20.0,
-    base_trailing_gap: float = 0.20,
-    atr_mult_max: float = 2.0,
-    trailing_gap_pct: float = 25.0,
+    entry_price: float = 0.5,        # 入场价（用于止盈阈值计算，必须稳定不变）
+    tp_high_min: float = 30.0,       # 入场价 0.2 时 TP 上限（%）
+    tp_high_max: float = 10.0,      # 入场价 0.6 时 TP 下限（%）
+    tp_entry_min: float = 0.2,       # 映射区间下限
+    tp_entry_max: float = 0.6,       # 映射区间上限
 ) -> RealtimeSignal:
     """
     根据传入的实时指标 dict，计算 Core 6 共识数量和方向。
-    同时使用 Polymarket 概率 ATR（基于 _price_history）计算动态阈值，
-    实现三重门 + 标准止盈止损的统一阈值体系。
 
     mkt: MarketInfo 实例（含 _price_history），用于计算概率 ATR。
          若为 None 则降级使用 Binance 美元 ATR（向后兼容）。
-    base_sl / base_tp1 / base_tp2 / base_trailing_gap / trailing_gap_pct:
-         运行时可调参数，由 sync_params 注入（P3-10）。
-    trailing_gap_pct: 入场价的回撤百分比（0~100），用于计算移动止损触发线。
-         旧版 base_trailing_gap 是概率绝对差值，已废弃，仅保留用于向后兼容。
+    entry_price: 入场时的 UP/DOWN 价格（用于止盈阈值计算，必须稳定不变）。
+         与当前市场价无关，这样持仓期间 TP 目标不会随价格变化而漂移。
+    tp_high_min / tp_high_max / tp_entry_min / tp_entry_max:
+         入场价 → 止盈百分比的线性映射参数，由 sync_params 注入。
+         入场价越低，止盈目标越高（如 0.2 → +30%，0.6 → +10%）。
     """
     # ── P0 Fix: 优先使用 Polymarket 概率 ATR，fallback 到 Binance 美元 ATR ──
-    # 文档第五章明确要求概率 ATR：
-    #   atr_probability = EMA(TR_1...TR_N)，TR = max(|UP_t-UP_{t-1}|, |UP_t-DOWN_{t-1}|, ...)
-    # 若 mkt 不可用则降级使用 indicators["atr"]（Binance 美元 ATR）
     if mkt is not None:
         atr_val = _compute_atr_probability(mkt, lookback=6)
     else:
@@ -267,17 +179,15 @@ def _compute_realtime_signal(
         if indicators and "atr" in indicators:
             atr_val = float(indicators["atr"])
 
-    atr_mult = min(1.0 + atr_val / 0.02, atr_mult_max)
+    atr_mult = min(1.0 + atr_val / 0.02, 2.0)
 
-    # 趋势强度 + 乘数
-    trend_strength, trend_mult = _compute_trend_strength(indicators, pos_side)
-
-    # 基础阈值（由 sync_params 注入，支持运行时热更新）
-    dyn_sl = max(base_sl * atr_mult, -30.0)
-    dyn_sl = min(dyn_sl, -5.0)
-    dyn_tp1 = max(base_tp1 * atr_mult * trend_mult, 8.0)
-    dyn_tp2 = max(base_tp2 * atr_mult * trend_mult, dyn_tp1 + 5.0)
-    trailing_gap = 0.20 / trend_mult  # 旧逻辑：概率绝对差（向后兼容）
+    # 动态止盈：基于入场价的线性插值
+    # 入场价越低 → 止盈目标越高
+    # 例：tp_entry_min=0.2 → tp_high_min=30%  |  tp_entry_max=0.6 → tp_high_max=10%
+    # 固定使用 entry_price（入场价），避免持仓期间 TP 目标随当前价漂移
+    entry_clamped = max(tp_entry_min, min(tp_entry_max, entry_price))
+    t = (entry_clamped - tp_entry_min) / (tp_entry_max - tp_entry_min)  # 0→低价入, 1→高价入
+    dyn_tp = tp_high_min + (tp_high_max - tp_high_min) * t             # 低价入→高TP, 高价入→低TP
 
     # Core 6 共识计算（从 indicators dict 提取）
     agree_count = 0
@@ -362,13 +272,7 @@ def _compute_realtime_signal(
         reverse_count=reverse_count,
         atr_value=atr_val,
         atr_mult=atr_mult,
-        trend_strength=trend_strength,
-        trend_mult=trend_mult,
-        dynamic_sl=dyn_sl,
-        dynamic_tp1=dyn_tp1,
-        dynamic_tp2=dyn_tp2,
-        trailing_gap=trailing_gap,
-        trailing_gap_pct=trailing_gap_pct,
+        dynamic_tp=dyn_tp,
         cvd_reverse=cvd_reverse,
         cvd_z=cvd_z,
     )
@@ -401,39 +305,18 @@ class ExitController:
         # 每轮 check_exit 的信号快照（用于日志）
         self._last_signal: dict[str, RealtimeSignal] = {}
         # ── P3-10 Fix: 支持运行时调参 ────────────────────────────────
-        self._base_sl: float = -10.0
-        self._base_tp1: float = 8.0
-        self._base_tp2: float = 20.0
-        self._base_trailing_gap: float = 0.20
-        self._atr_mult_max: float = 2.0
-        self._trailing_gap_pct: float = 25.0
+        # TP 阈值参数：入场价 → 止盈映射（见 runtime_config TP_HIGH_MIN/MAX）
+        self._tp_high_min: float = 30.0    # 入场价 0.2 时的 TP 上限
+        self._tp_high_max: float = 10.0    # 入场价 0.6 时的 TP 下限
+        self._tp_entry_min: float = 0.2    # 映射区间下限
+        self._tp_entry_max: float = 0.6    # 映射区间上限
 
     def sync_params(self, cfg: dict) -> None:
         """从 runtime_config 同步退出阈值参数，支持运行时热更新"""
-        self._base_sl = float(cfg.get("sl_base_pct", -10.0))
-        self._base_tp1 = float(cfg.get("tp1_base_pct", 8.0))
-        self._base_tp2 = float(cfg.get("tp2_base_pct", 20.0))
-        self._base_trailing_gap = float(cfg.get("trailing_gap_base", 0.20))
-        self._atr_mult_max = float(cfg.get("atr_mult_max", 2.0))
-        self._trailing_gap_pct = float(cfg.get("trailing_gap_pct", 25.0))
-
-    # ── P3-12 Fix: 废弃 _get_dynamic_thresholds，统一由 _compute_realtime_signal 计算 ─
-    # 此函数已被 _compute_realtime_signal 取代（内含概率 ATR 计算），
-    # 保留仅用于向后兼容，不推荐新代码调用。
-    def _get_dynamic_thresholds(
-        self, mkt, entry_price: float, pos: "OpenPosition",
-    ) -> tuple[float, float, float]:
-        """
-        [DEPRECATED] 基于概率 ATR 动态计算止盈止损阈值。
-        请直接调用 _compute_realtime_signal(indicators, pos.side, mkt)。
-        Returns: (dynamic_sl, dynamic_tp1, dynamic_tp2)
-        """
-        atr = _compute_atr_probability(mkt, lookback=6)
-        mult = min(1.0 + atr / 0.02, 2.0)
-        dyn_sl  = max(min(self._base_sl * mult, -5.0), -30.0)
-        dyn_tp1 = max(self._base_tp1 * mult, 8.0)
-        dyn_tp2 = max(self._base_tp2 * mult, dyn_tp1 + 5.0)
-        return dyn_sl, dyn_tp1, dyn_tp2
+        self._tp_high_min = float(cfg.get("tp_high_min", 30.0))
+        self._tp_high_max = float(cfg.get("tp_high_max", 10.0))
+        self._tp_entry_min = float(cfg.get("tp_entry_min", 0.2))
+        self._tp_entry_max = float(cfg.get("tp_entry_max", 0.6))
 
     # ── 三重门决策 ─────────────────────────────────────────────────────────
 
@@ -453,7 +336,6 @@ class ExitController:
         mkt: MarketInfo 实例（含 _price_history），用于重新计算实时信号（含 CVD 反向检测）。
         """
         pos_side = pos.side
-        tp_stage = getattr(pos, "_tp_stage", 0)
 
         # ── Gate 1a：Core 6 信号反向早平 ───────────────────────────────
         # ── Gate 1b：CVD 反向立即平仓（最强单信号，优先级高于 Core 反向）──
@@ -483,7 +365,7 @@ class ExitController:
                 reason="GATE1_EARLY_EXIT",
                 reason_detail=sig.gate1_reason,
                 tp_hit_data=pos.tp_hit,
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-10.0,
             ), sig
 
         if sig.reverse_count >= 4:
@@ -509,115 +391,52 @@ class ExitController:
                 reason="GATE1_EARLY_EXIT",
                 reason_detail=sig.gate1_reason,
                 tp_hit_data=pos.tp_hit,
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-10.0,
             ), sig
 
-        # ── Gate 2：TP 信号续持 ──────────────────────────────────────────
-        if tp_stage == 0 and delta_pct >= sig.dynamic_tp1:
-            if sig.agree_count >= 4:
-                sig.gate2_triggered = True
-                sig.gate2_action = "CONTINUE"
-                sig.gate2_reason = (
-                    f"Gate2: TP1 hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
-                    f"skip TP, continue holding"
-                )
-                sig.decision = "HOLD"
-                return ExitSignal(
-                    should_exit=False,
-                    reason="GATE2_SKIP_TP",
-                    reason_detail=sig.gate2_reason,
-                    stop_loss_pct=sig.dynamic_sl,
-                    take_profit_pct=pos.tp_pct,
-                ), sig
-
-        if tp_stage == 1 and delta_pct >= sig.dynamic_tp2:
+        # ── Gate 2：TP 阈值到达时信号续持检查 ──────────────────────────────
+        if delta_pct >= sig.dynamic_tp:
             if sig.agree_count >= 3:
                 sig.gate2_triggered = True
                 sig.gate2_action = "CONTINUE"
                 sig.gate2_reason = (
-                    f"Gate2: TP2 hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
+                    f"Gate2: TP hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
                     f"skip TP, continue holding"
                 )
-                sig.decision = "HOLD"
                 return ExitSignal(
                     should_exit=False,
-                    reason="GATE2_SKIP_TP2",
+                    reason="GATE2_SKIP_TP",
                     reason_detail=sig.gate2_reason,
-                    stop_loss_pct=sig.dynamic_sl,
+                    stop_loss_pct=-10.0,
                     take_profit_pct=pos.tp_pct,
                 ), sig
 
-        # ── Gate 3：移动止损信号增强 ─────────────────────────────────────
-        trailing_activate = getattr(pos, "trailing_stop_activate_pct", 70.0) / 100.0
-        if not getattr(pos, "trailing_stop_activated", False):
-            # 提前激活条件：信号转弱（< 3/6 同向）OR 概率已达激活线
-            if sig.agree_count < 3 or current_price >= trailing_activate:
-                sig.gate3_triggered = True
-                sig.gate3_action = "ACTIVATE_TRAILING"
-                # 基于入场价回撤计算跟踪线（代替旧版概率绝对差）
-                # 跟踪线 = 入场价 - 入场价 × 回撤比例 = 入场价 × (1 - trailing_gap_pct/100)
-                entry_price = pos.entry_price if pos.entry_price > 0 else current_price
-                trail_line = entry_price * (1.0 - sig.trailing_gap_pct / 100.0)
-                sig.gate3_reason = (
-                    f"Gate3: trailing stop activated "
-                    f"(prob={current_price:.4f}>={trailing_activate:.4f} "
-                    f"OR agree={sig.agree_count}/6<3) "
-                    f"trailing_line={trail_line:.4f}(entry={entry_price:.4f}@{sig.trailing_gap_pct:.1f}%)"
-                )
-                pos.trailing_stop_activated = True
-                pos.trailing_stop_pct = max(0.01, trail_line)
-                logger.info(
-                    "GATE3 ACTIVATE [{}] {} prob={:.4f} entry={:.4f} "
-                    "trailing_line={:.4f} gap_pct={:.1f}% "
-                    "agree={}/6 atr_mult={:.2f} trend={:.0f} trend_mult={:.2f}",
-                    pos.asset, pos_side.value, current_price,
-                    entry_price, pos.trailing_stop_pct, sig.trailing_gap_pct,
-                    sig.agree_count, sig.atr_mult,
-                    sig.trend_strength, sig.trend_mult,
-                )
-
-        # 移动止损跟踪
-        if getattr(pos, "trailing_stop_activated", False):
-            trail_line = getattr(pos, "trailing_stop_pct", 0.0)
-            if trail_line > 0 and current_price <= trail_line:
-                sig.gate3_triggered = True
-                sig.gate3_action = "TRAILING_EXIT"
-                sig.gate3_reason = (
-                    f"Gate3: trailing line hit {trail_line:.4f}<=current {current_price:.4f}"
-                )
-                pos.tp_hit = {
-                    "kind": "trailing_profit",
-                    "gate": "gate3_trailing",
-                    "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
-                    "exit_price": current_price,
-                    "pnl_pct": round(delta_pct, 2),
-                    "trailing_stop_pct": round(trail_line * 100, 2),
-                    "realtime_agree": sig.agree_count,
-                    "entry_core_agree": pos.entry_core_agree,
-                }
-                sig.decision = "TRAILING"
-                return ExitSignal(
-                    should_exit=True,
-                    reason="GATE3_TRAILING_EXIT",
-                    reason_detail=sig.gate3_reason,
-                    tp_hit_data=pos.tp_hit,
-                    stop_loss_pct=sig.dynamic_sl,
-                    take_profit_pct=pos.tp_pct,
-                ), sig
-            # 跟随市场上移跟踪线（只上移，不下移）
-            # 跟踪线锚定到峰值价格，而非入场价
-            # → 真正的移动止损：锁定利润，允许市场继续上涨
-            peak_price = getattr(pos, "_peak_price", pos.entry_price)
-            if current_price > peak_price:
-                peak_price = current_price
-                pos._peak_price = peak_price
-            new_trail = peak_price * (1.0 - sig.trailing_gap_pct / 100.0)
-            if current_price > trail_line + 0.005:
-                pos.trailing_stop_pct = max(trail_line, new_trail)
+        # ── Gate 3：信号减弱且已实现一定利润 → 退出 ─────────────────────────
+        # 仅在盈利状态下触发，避免被动止损
+        if sig.agree_count < 3 and delta_pct > 0:
+            sig.gate3_triggered = True
+            sig.gate3_action = "SIGNAL_WEAKEN_EXIT"
+            sig.gate3_reason = (
+                f"Gate3: signal weakened agree={sig.agree_count}/6<3, "
+                f"pnl={delta_pct:.1f}% > 0"
+            )
+            sig.decision = "GATE3_EXIT"
+            logger.info(
+                "GATE3 EXIT [{}] {} agree={}/6 pnl={:.1f}% entry={:.4f} cur={:.4f}",
+                pos.asset, pos_side.value, sig.agree_count, delta_pct,
+                entry_price, current_price,
+            )
+            return ExitSignal(
+                should_exit=True,
+                reason="GATE3_SIGNAL_WEAKEN",
+                reason_detail=sig.gate3_reason,
+                stop_loss_pct=-10.0,
+                take_profit_pct=pos.tp_pct,
+            ), sig
 
         return ExitSignal(
             should_exit=False,
-            stop_loss_pct=sig.dynamic_sl,
+            stop_loss_pct=-10.0,
             take_profit_pct=pos.tp_pct,
         ), sig
 
@@ -631,99 +450,137 @@ class ExitController:
         pnl_pct: float,
         now: datetime,
     ) -> tuple[ExitSignal, RealtimeSignal]:
-        """三重门未触发时，执行标准的止盈止损检查。"""
-        tp_stage = getattr(pos, "_tp_stage", 0)
-        delta_pct = pnl_pct
+        """
+        三重门未触发时，执行标准止盈止损检查。
 
-        # 标准止损
-        if pnl_pct <= sig.dynamic_sl:
+        止损逻辑（固定阈值 + 信号确认）：
+          亏损 <= -20%   → 无条件立即止损
+          亏损 > -20% 但 <= -10%：
+            信号同向 >= 3 → 继续持有，等待反转盈利
+            信号不足 < 3  → 全部止损退出
+
+        止盈逻辑（单一阈值）：
+          PnL >= dynamic_tp → 检查信号
+            信号同向 >= 3 → 跳过，继续持有
+            信号不足     → 触发全部止盈
+        """
+        # ── 止损：-20% 无条件止损 ─────────────────────────────────────────────
+        if pnl_pct <= -20.0:
             pos.tp_hit = {
                 "kind": ExitReason.STOP_LOSS,
                 "gate": "standard_sl",
                 "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
                 "exit_price": current_price,
                 "pnl_pct": round(pnl_pct, 2),
-                "atr_multiplier": sig.atr_mult,
-                "entry_core_agree": pos.entry_core_agree,
                 "realtime_agree": sig.agree_count,
+                "entry_core_agree": pos.entry_core_agree,
             }
+            logger.info(
+                "EXIT CHECK [{}] {} STOP_LOSS: pnl={:.1f}% <= -20% — 无条件止损",
+                pos.asset, pos.side.value, pnl_pct,
+            )
             return ExitSignal(
                 should_exit=True,
                 reason="SL_FULL",
-                reason_detail=f"标准止损 pnl={pnl_pct:.2f}% <= SL={sig.dynamic_sl:.1f}%",
+                reason_detail=f"亏损 {pnl_pct:.1f}% <= -20%，无条件止损",
                 tp_hit_data=pos.tp_hit,
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-20.0,
                 take_profit_pct=pos.tp_pct,
             ), sig
 
-        # 标准 TP1（Gate2 未跳过时）
-        if tp_stage == 0 and delta_pct >= sig.dynamic_tp1:
-            pos._tp_stage = 1
-            pos._partial_exit_triggered = True
+        # ── 止损：-10% 触发，信号确认后可继续持有 ──────────────────────────────
+        if pnl_pct <= -10.0:
+            if sig.agree_count >= 3:
+                logger.info(
+                    "EXIT CHECK [{}] {} SL TRIGGER but HOLD (信号续持): "
+                    "pnl={:.1f}% agree={}/6 — 等待反转盈利",
+                    pos.asset, pos.side.value, pnl_pct, sig.agree_count,
+                )
+                return ExitSignal(
+                    should_exit=False,
+                    reason="SL_SKIP",
+                    reason_detail=(
+                        f"亏损 {pnl_pct:.1f}% > -20% 且信号同向 agree={sig.agree_count}/6>=3，"
+                        f"继续持有等待反转"
+                    ),
+                    stop_loss_pct=-10.0,
+                    take_profit_pct=pos.tp_pct,
+                ), sig
+            else:
+                pos.tp_hit = {
+                    "kind": ExitReason.STOP_LOSS,
+                    "gate": "standard_sl",
+                    "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
+                    "exit_price": current_price,
+                    "pnl_pct": round(pnl_pct, 2),
+                    "realtime_agree": sig.agree_count,
+                    "entry_core_agree": pos.entry_core_agree,
+                }
+                logger.info(
+                    "EXIT CHECK [{}] {} STOP_LOSS: pnl={:.1f}% <= -10% "
+                    "agree={}/6 < 3 — 止损退出",
+                    pos.asset, pos.side.value, pnl_pct, sig.agree_count,
+                )
+                return ExitSignal(
+                    should_exit=True,
+                    reason="SL_FULL",
+                    reason_detail=f"亏损 {pnl_pct:.1f}% > -20% 且信号不足 agree={sig.agree_count}/6<3，止损",
+                    tp_hit_data=pos.tp_hit,
+                    stop_loss_pct=-10.0,
+                    take_profit_pct=pos.tp_pct,
+                ), sig
+
+        # ── 单一止盈阈值：达到 → 信号确认 → 触发或跳过 ──────────────────────
+        if pnl_pct >= sig.dynamic_tp:
+            if sig.agree_count >= 3:
+                # 信号仍同向 → 跳过止盈，继续持有
+                logger.info(
+                    "EXIT CHECK [{}] {} TP hit but SKIP (信号续持): "
+                    "pnl={:.1f}% tp={:.1f}% agree={}/6 — HOLD",
+                    pos.asset, pos.side.value, pnl_pct, sig.dynamic_tp, sig.agree_count,
+                )
+                return ExitSignal(
+                    should_exit=False,
+                    reason="TP_SKIP",
+                    reason_detail=(
+                        f"止盈阈值 pnl={pnl_pct:.1f}%>={sig.dynamic_tp:.1f}% 但信号同向 "
+                        f"agree={sig.agree_count}/6>=3，继续持有"
+                    ),
+                    stop_loss_pct=-10.0,
+                    take_profit_pct=pos.tp_pct,
+                ), sig
+
+            # 信号不足 → 触发全部止盈 100%
             pos.tp_hit = {
                 "kind": ExitReason.TAKE_PROFIT,
-                "gate": "standard_tp1",
+                "gate": "standard_tp",
                 "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
                 "exit_price": current_price,
                 "pnl_pct": round(pnl_pct, 2),
-                "dynamic_tp1": sig.dynamic_tp1,
+                "dynamic_tp": sig.dynamic_tp,
                 "atr_mult": sig.atr_mult,
                 "entry_core_agree": pos.entry_core_agree,
                 "realtime_agree": sig.agree_count,
             }
             logger.info(
-                "EXIT CHECK [{}] {} TP1 hit: pnl={:.1f}% delta={:.1f}% "
-                "tp1={:.1f}% atr_mult={:.2f} trend={:.0f} trend_mult={:.2f} "
-                "entry_agree={}/6 realtime_agree={}/6",
-                pos.asset, pos.side.value, pnl_pct, delta_pct, sig.dynamic_tp1,
-                sig.atr_mult, sig.trend_strength, sig.trend_mult,
-                pos.entry_core_agree, sig.agree_count,
+                "EXIT CHECK [{}] {} TP hit: pnl={:.1f}% tp={:.1f}% "
+                "atr_mult={:.2f} entry_agree={}/6 realtime_agree={}/6",
+                pos.asset, pos.side.value, pnl_pct, sig.dynamic_tp,
+                sig.atr_mult, pos.entry_core_agree, sig.agree_count,
             )
             return ExitSignal(
                 should_exit=True,
                 reason="TP",
-                reason_detail=f"标准TP1 pnl={pnl_pct:.1f}%>={sig.dynamic_tp1:.1f}%",
+                reason_detail=f"止盈触发 pnl={pnl_pct:.1f}%>={sig.dynamic_tp:.1f}%",
                 tp_hit_data=pos.tp_hit,
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-10.0,
                 take_profit_pct=pos.tp_pct,
-                partial_close_pct=0.5,
-            ), sig
-
-        # 标准 TP2
-        if tp_stage == 1 and delta_pct >= sig.dynamic_tp2:
-            pos._tp_stage = 2
-            pos.tp_hit = {
-                "kind": ExitReason.TAKE_PROFIT_2,
-                "gate": "standard_tp2",
-                "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
-                "exit_price": current_price,
-                "pnl_pct": round(pnl_pct, 2),
-                "dynamic_tp2": sig.dynamic_tp2,
-                "atr_mult": sig.atr_mult,
-                "entry_core_agree": pos.entry_core_agree,
-                "realtime_agree": sig.agree_count,
-            }
-            logger.info(
-                "EXIT CHECK [{}] {} TP2 hit: pnl={:.1f}% delta={:.1f}% "
-                "tp2={:.1f}% atr_mult={:.2f} trend={:.0f} trend_mult={:.2f} "
-                "entry_agree={}/6 realtime_agree={}/6",
-                pos.asset, pos.side.value, pnl_pct, delta_pct, sig.dynamic_tp2,
-                sig.atr_mult, sig.trend_strength, sig.trend_mult,
-                pos.entry_core_agree, sig.agree_count,
-            )
-            return ExitSignal(
-                should_exit=True,
-                reason="TP2",
-                reason_detail=f"标准TP2 pnl={pnl_pct:.1f}%>={sig.dynamic_tp2:.1f}%",
-                tp_hit_data=pos.tp_hit,
-                stop_loss_pct=sig.dynamic_sl,
-                take_profit_pct=pos.tp_pct,
-                partial_close_pct=0.6,
+                partial_close_pct=1.0,
             ), sig
 
         return ExitSignal(
             should_exit=False,
-            stop_loss_pct=sig.dynamic_sl,
+            stop_loss_pct=-10.0,
             take_profit_pct=pos.tp_pct,
         ), sig
 
@@ -786,15 +643,15 @@ class ExitController:
         current_price = up_mid if pos.side == Side.UP else down_mid
         pnl_pct = self._pos_mgr.unrealized_pnl_pct(up_mid, down_mid, pos)
 
-        # 实时信号（概率 ATR 阈值 + Core 6 共识）
+        # 实时信号（Core 6 共识 + 止盈阈值）
+        # 注意：dyn_tp 必须用入场价计算，不能用当前价（否则价格上涨后 TP 目标反而降低）
         sig = _compute_realtime_signal(
             indicators, pos.side, mkt,
-            base_sl=self._base_sl,
-            base_tp1=self._base_tp1,
-            base_tp2=self._base_tp2,
-            base_trailing_gap=self._base_trailing_gap,
-            atr_mult_max=self._atr_mult_max,
-            trailing_gap_pct=self._trailing_gap_pct,
+            entry_price=pos.entry_price,
+            tp_high_min=self._tp_high_min,
+            tp_high_max=self._tp_high_max,
+            tp_entry_min=self._tp_entry_min,
+            tp_entry_max=self._tp_entry_max,
         )
 
         # ── P3-14 Fix: 每 tick 日志降为 DEBUG，避免日志淹没 ─────────────────
@@ -807,27 +664,22 @@ class ExitController:
         logger.debug(
             "EXIT CHECK [{}] elapsed={:.0f}s rem={:.0f}s | "
             "entry={:.4f} cur={:.4f} pnl={:+.1f}% | "
-            "sl={:.1f}% tp1={:.1f}% tp2={:.1f}% gap_pct={:.1f}% | "
+            "sl=-10% tp={:.1f}% | "
             "atr={:.4f} atr_mult={:.2f} | "
-            "trend={:.0f} trend_mult={:.2f} | "
-            "agree={}/6({}) rev={}/6 cvd_rev={} | "
-            "tp_stage={} trailing_act={}",
+            "agree={}/6({}) rev={}/6 cvd_rev={}",
             pos.asset,
             elapsed_s, window_rem,
             pos.entry_price, current_price,
             pnl_pct if pnl_pct else 0.0,
-            sig.dynamic_sl, sig.dynamic_tp1, sig.dynamic_tp2, sig.trailing_gap_pct,
+            sig.dynamic_tp,
             sig.atr_value, sig.atr_mult,
-            sig.trend_strength, sig.trend_mult,
             sig.agree_count, sig.agree_dir,
             sig.reverse_count, sig.cvd_reverse,
-            getattr(pos, "_tp_stage", 0),
-            getattr(pos, "trailing_stop_activated", False),
         )
 
         if pnl_pct is None:
             return ExitSignal(
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-10.0,
                 take_profit_pct=pos.tp_pct,
             )
 
@@ -843,7 +695,7 @@ class ExitController:
             )
             return ExitSignal(
                 should_exit=False,
-                stop_loss_pct=sig.dynamic_sl,
+                stop_loss_pct=-10.0,
                 take_profit_pct=pos.tp_pct,
             )
 
@@ -874,7 +726,7 @@ class ExitController:
 
         return ExitSignal(
             should_exit=False,
-            stop_loss_pct=sig.dynamic_sl,
+            stop_loss_pct=-10.0,
             take_profit_pct=pos.tp_pct,
         )
 
@@ -937,14 +789,6 @@ class ExitController:
                 partial_close_pct=exit_signal.partial_close_pct,
             )
 
-        elif reason == "TP2":
-            await self.spawn_close(
-                asset, pos, ExitReason.TAKE_PROFIT_2,
-                live_trader=live_trader,
-                ctx=ctx,
-                partial_close_pct=exit_signal.partial_close_pct,
-            )
-
         elif reason == "SL_FULL":
             await self.spawn_close(
                 asset, pos, ExitReason.STOP_LOSS,
@@ -959,9 +803,9 @@ class ExitController:
                 ctx=ctx,
             )
 
-        elif reason == "GATE3_TRAILING_EXIT":
+        elif reason == "GATE3_SIGNAL_WEAKEN":
             await self.spawn_close(
-                asset, pos, ExitReason.TRAILING_EXIT,
+                asset, pos, ExitReason.GATE3_EXIT,
                 live_trader=live_trader,
                 ctx=ctx,
             )
@@ -1074,7 +918,7 @@ class ExitController:
                 ExitReason.TAKE_PROFIT_2,
                 ExitReason.STOP_LOSS,
                 ExitReason.STOP_LOSS_EARLY,
-                ExitReason.TRAILING_EXIT,
+                ExitReason.GATE3_EXIT,
                 ExitReason.SETTLE,
                 ExitReason.INVALID_POSITION,
             ):

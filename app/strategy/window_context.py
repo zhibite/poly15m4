@@ -6,7 +6,6 @@ window_context.py — 窗口生命周期状态（单持仓版）
 
 简化说明（2026-05-30）：
 - 无补仓相关字段
-- 无补仓相关字段（addon_drawdown_levels, addon_count, etc.）
 - 单单持仓：只允许一次入场，入场后只做止盈止损/窗口结算
 """
 
