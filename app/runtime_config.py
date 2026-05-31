@@ -101,16 +101,14 @@ _runtime: dict = {
     "core_agree_threshold":           int(float(_env("CORE_AGREE_THRESHOLD", "3"))),
     "core_agree_standard":           int(float(_env("CORE_AGREE_STANDARD", "3"))),
 
-    # 止盈（基于入场价的动态 TP：入场价越低 → TP 目标越高）
-    # 公式：tp_pct = tp_base_pct + tp_range_pct × (entry_price_max_tp - entry_price) / range
-    # 例：tp_base_pct=10 / tp_range_pct=20 / entry_price_min_tp=0.2 / entry_price_max_tp=0.6
-    #       入场 0.2 → TP=30%  |  入场 0.4 → TP=20%  |  入场 0.6 → TP=10%
-    "tp_high_min":                 float(_env("TP_HIGH_MIN", "30.0")),
-    "tp_high_max":                 float(_env("TP_HIGH_MAX", "10.0")),
-    "tp_entry_min":                float(_env("TP_ENTRY_MIN", "0.20")),
-    "tp_entry_max":                float(_env("TP_ENTRY_MAX", "0.60")),
-    # 止损
-    "sl_base_pct":                 float(_env("SL_BASE_PCT", "-10.0")),
+    # ── 止盈止损（entry_controller._calc_stop_levels）─────────────────────
+    # TP = tp_base_pct + tp_range_pct × (entry_price_max_tp - entry_price) / range
+    "tp_base_pct":             float(_env("TP_BASE_PCT", "10.0")),
+    "tp_range_pct":           float(_env("TP_RANGE_PCT", "20.0")),
+    "entry_price_min_tp":     float(_env("TP_ENTRY_PRICE_MIN", "0.20")),
+    "entry_price_max_tp":     float(_env("TP_ENTRY_PRICE_MAX", "0.60")),
+    # 止损（固定 -10%）
+    "sl_base_pct":            float(_env("SL_BASE_PCT", "-10.0")),
 }
 
 _ENV_KEYS: dict[str, str] = {
@@ -140,11 +138,7 @@ _ENV_KEYS: dict[str, str] = {
     "tp_range_pct":                  "TP_RANGE_PCT",
     "entry_price_min_tp":             "TP_ENTRY_PRICE_MIN",
     "entry_price_max_tp":             "TP_ENTRY_PRICE_MAX",
-    "sl_base_pct":               "SL_BASE_PCT",
-    "tp_high_min":              "TP_HIGH_MIN",
-    "tp_high_max":              "TP_HIGH_MAX",
-    "tp_entry_min":             "TP_ENTRY_MIN",
-    "tp_entry_max":             "TP_ENTRY_MAX",
+    "sl_base_pct":             "SL_BASE_PCT",
 }
 
 # 缓存上次返回的深拷贝，仅当 _runtime 实际更新后才重新生成。

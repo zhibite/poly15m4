@@ -84,19 +84,12 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     "entry_price_min": (0.01, 0.95),
     "entry_price_max": (0.05, 0.70),
 
-    # 止盈止损（per trading-guide.md）
+    # 止盈止损（entry_controller._calc_stop_levels）
     "tp_base_pct": (1.0, 99.0),
     "tp_range_pct": (5.0, 50.0),
     "entry_price_min_tp": (0.05, 0.50),
     "entry_price_max_tp": (0.05, 0.60),
     "sl_base_pct": (-99.0, 0.0),
-
-    # 退出阈值（exit_controller._compute_realtime_signal）
-    # dyn_tp = tp_high_min + (tp_high_max - tp_high_min) * t
-    "tp_high_min":  (1.0, 50.0),   # 入场价 0.2 时的 TP 上限
-    "tp_high_max":  (1.0, 30.0),   # 入场价 0.6 时的 TP 下限（必须 < tp_high_min）
-    "tp_entry_min": (0.05, 0.40),  # TP 映射区间下限
-    "tp_entry_max": (0.40, 0.70),   # TP 映射区间上限
 
     # 兼容旧 key
     "signal_fixed_stop_loss_pct": (-99.0, 0.0),

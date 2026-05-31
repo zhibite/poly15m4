@@ -356,13 +356,12 @@ class SinglePositionStrategy:
 
                 ops = self._symbols_operational()
 
-                # 1. 退出检查（传入实时信号用于三重门决策）
+                # 退出检查
                 for asset in ops:
                     ctx = ctxs.get(asset)
                     if not ctx or not ctx.position:
                         continue
-                    indicators = self._latest_indicators.get(asset)
-                    exit_signal = self._exit_ctrl.check_exit(ctx, indicators=indicators)
+                    exit_signal = self._exit_ctrl.check_exit(ctx)
                     if exit_signal.should_exit:
                         await self._exit_ctrl.handle_exit(
                             asset, ctx, exit_signal,

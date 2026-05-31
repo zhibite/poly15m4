@@ -197,7 +197,6 @@ class PositionManager:
         始终返回 SellOutcome：成功时 success=True，失败时 success=False 并附带 error。
         caller 根据 outcome.success 判断是否走 redeem fallback。
         """
-        pusd_bal, _ = await live_trader.get_balance_and_allowance("COLLATERAL")
         result = await live_trader.sell_token(
             pos.token_id_bought,
             tokens_to_sell,
@@ -272,7 +271,6 @@ class PositionManager:
         tokens_at_entry: float,
         close_reason: str = ExitReason.TAKE_PROFIT,
         closed_at_override: Optional[datetime] = None,
-        tp_trigger_exit_price: Optional[float] = None,
     ) -> tuple[float, float, str, float, bool]:
         """
         循环执行 CLOB sell，直到余额清零或超过最大轮数。
@@ -326,12 +324,9 @@ class PositionManager:
                 # 此分支 tokens_to_sell==0，无实际卖出，不做除法，直接用市场价
                 avg_exit = sell_price
                 if not already_recorded and total_sold_tokens <= 1e-9:
-                    # 此前没有任何卖出记录，补写 Trade（按入场价估算 PnL）
-                    record_exit = tp_trigger_exit_price if tp_trigger_exit_price is not None else avg_exit
                     await self._record_trade(
-                        pos, record_exit, close_reason, closed_at_override,
+                        pos, avg_exit, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
-                        tp_trigger_exit_price=tp_trigger_exit_price,
                     )
                     pos._trade_recorded = True
                     already_recorded = True
@@ -354,7 +349,6 @@ class PositionManager:
                     await self._record_trade(
                         pos, sell_price, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
-                        tp_trigger_exit_price=tp_trigger_exit_price,
                     )
                     # CRITICAL: also set pos._trade_recorded so close_position's
                     # own _record_trade call at the end does not create a duplicate.
@@ -487,7 +481,6 @@ class PositionManager:
                     await self._record_trade(
                         pos, avg_first_exit, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
-                        tp_trigger_exit_price=tp_trigger_exit_price,
                     )
                     # CRITICAL: also set pos._trade_recorded so close_position's
                     # own _record_trade call at the end does not create a duplicate.
@@ -555,14 +548,13 @@ class PositionManager:
         live_trader=None,
         skip_record: bool = False,
         resolved_market=None,
-        tp_trigger_exit_price: Optional[float] = None,
         settle_up_wins: Optional[bool] = None,
         partial_close_pct: Optional[float] = None,
     ) -> tuple[float, float]:
         """
         平仓主入口。
         settle_up_wins: 从 settle_if_due 获取的结算胜负，用于 Gamma 超时时的兜底 effective price。
-        partial_close_pct: 部分平仓比例（0.0~1.0），用于强信号首次止盈时止盈 50%。
+        partial_close_pct: 部分平仓比例（0.0~1.0），目前固定为 None（全额平仓）。
         Returns: (pnl_pct, pnl_usd)
         """
         mkt = resolved_market if resolved_market is not None else pos.market
@@ -591,10 +583,9 @@ class PositionManager:
                 override_exit_price = 0.0 if settle_up_wins else 1.0
 
         if override_exit_price is not None:
-            pnl_pct, pnl_usd, recorded_by_override = await self._close_with_override(
+            pnl_pct, pnl_usd = await self._close_with_override(
                 pos, close_reason, override_exit_price,
                 closed_at_override, live_trader, mkt, already_recorded,
-                tp_trigger_exit_price,
             )
             pos._last_pnl_pct = pnl_pct
             pos._last_pnl_usd = pnl_usd
@@ -609,12 +600,8 @@ class PositionManager:
                 pos._trade_recorded = True
                 pos._trade_recorded_reason = close_reason
                 await self._record_trade(pos, sell_price, close_reason, closed_at_override,
-                                        total_sold_tokens=pos.tokens_bought,
-                                        tp_trigger_exit_price=tp_trigger_exit_price)
-            record_exit = sell_price
-            if tp_trigger_exit_price is not None and ExitReason.is_take_profit(close_reason):
-                record_exit = tp_trigger_exit_price
-            pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit, pos.tokens_bought)
+                                        total_sold_tokens=pos.tokens_bought)
+            pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, pos.tokens_bought)
             pos._last_pnl_pct = pnl_pct
             pos._last_pnl_usd = pnl_usd
             return pnl_pct, pnl_usd
@@ -656,12 +643,8 @@ class PositionManager:
                 await self._record_trade(
                     pos, sell_price, ExitReason.ALREADY_CLOSED, closed_at_override,
                     total_sold_tokens=tokens_at_entry,
-                    tp_trigger_exit_price=tp_trigger_exit_price,
                 )
-            record_exit = sell_price
-            if tp_trigger_exit_price is not None and ExitReason.is_take_profit(close_reason):
-                record_exit = tp_trigger_exit_price
-            pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit, tokens_at_entry)
+            pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, tokens_at_entry)
             pos._last_pnl_pct = pnl_pct
             pos._last_pnl_usd = pnl_usd
             return pnl_pct, pnl_usd
@@ -705,7 +688,6 @@ class PositionManager:
                         await self._record_trade(
                             pos, outcome.fill_price, close_reason, closed_at_override,
                             total_sold_tokens=tokens_to_sell,
-                            tp_trigger_exit_price=tp_trigger_exit_price,
                         )
                     # Bug-4 fix: PnL 分母统一用 tokens_at_entry（入场总量），
                     # 与全额平仓路径（_close_loop）保持一致。
@@ -724,27 +706,19 @@ class PositionManager:
         ) = await self._close_loop(
             pos, sell_price, neg_risk, live_trader,
             already_recorded, tokens_at_entry,
-            close_reason, closed_at_override, tp_trigger_exit_price,
+            close_reason, closed_at_override,
         )
 
         # ── 记录平仓 ────────────────────────────────────────────────────────
         # PnL is always computed from the FULL position (all fills) at avg_exit.
-        # Dust/force-sell proceeds that polluted total_sold_tokens are NOT used here.
-        # _close_loop already recorded the trade when dust/residual_exhausted was hit.
-        # recorded_by_loop reflects the updated state from _close_loop (fixes the
-        # Python value-passing issue where local already_recorded wasn't propagated).
         if not recorded_by_loop:
             pos._trade_recorded = True
             pos._trade_recorded_reason = final_reason or close_reason
             await self._record_trade(
                 pos, avg_exit, pos._trade_recorded_reason, closed_at_override,
                 total_sold_tokens=tokens_at_entry,
-                tp_trigger_exit_price=tp_trigger_exit_price,
             )
-        # C1 fix: tp_trigger_exit_price is always None from exit_controller,
-        # so always use avg_exit (the real fill price) for PnL computation.
-        record_exit_price = avg_exit
-        pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit_price, tokens_at_entry)
+        pnl_pct, pnl_usd = self._compute_pnl(pos, avg_exit, tokens_at_entry)
         pos._last_pnl_pct = pnl_pct
         pos._last_pnl_usd = pnl_usd
         return pnl_pct, pnl_usd
@@ -758,7 +732,6 @@ class PositionManager:
         live_trader,
         mkt,
         already_recorded: bool,
-        tp_trigger_exit_price: Optional[float] = None,
     ) -> tuple[float, float]:
         """override_exit_price 专用路径：结算/强制平仓"""
         avg_exit = override_exit_price
@@ -825,13 +798,8 @@ class PositionManager:
                     pos._trade_recorded = True
                     pos._trade_recorded_reason = final_reason
                     await self._record_trade(pos, avg_exit, final_reason, closed_at_override,
-                                             total_sold_tokens=tokens_at_entry,
-                                             tp_trigger_exit_price=tp_trigger_exit_price)
-                # For TP exits, align _last_pnl_pct with the recorded trigger-price PnL
-                record_exit = avg_exit
-                if tp_trigger_exit_price is not None and ExitReason.is_take_profit(final_reason):
-                    record_exit = tp_trigger_exit_price
-                pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit, tokens_at_entry)
+                                             total_sold_tokens=tokens_at_entry)
+                pnl_pct, pnl_usd = self._compute_pnl(pos, avg_exit, tokens_at_entry)
             else:
                 # All tokens already sold — raise so caller treats this as a clean
                 # close and clears ctx.position. Previously this silently returned,
@@ -843,12 +811,8 @@ class PositionManager:
                     pos._trade_recorded_reason = close_reason
                     await self._record_trade(pos, override_exit_price, close_reason,
                                              closed_at_override,
-                                             total_sold_tokens=tokens_at_entry,
-                                             tp_trigger_exit_price=tp_trigger_exit_price)
-                record_exit = override_exit_price
-                if tp_trigger_exit_price is not None and ExitReason.is_take_profit(close_reason):
-                    record_exit = tp_trigger_exit_price
-                pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit, tokens_at_entry)
+                                             total_sold_tokens=tokens_at_entry)
+                pnl_pct, pnl_usd = self._compute_pnl(pos, override_exit_price, tokens_at_entry)
                 avg_exit = override_exit_price
                 raise AlreadyClosedError(pos.asset, pnl_pct, pnl_usd)
         else:
@@ -856,18 +820,13 @@ class PositionManager:
                 pos._trade_recorded = True
                 pos._trade_recorded_reason = close_reason
                 await self._record_trade(pos, override_exit_price, close_reason, closed_at_override,
-                                         total_sold_tokens=tokens_at_entry,
-                                         tp_trigger_exit_price=tp_trigger_exit_price)
-            record_exit = override_exit_price
-            if tp_trigger_exit_price is not None and ExitReason.is_take_profit(close_reason):
-                record_exit = tp_trigger_exit_price
-            pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit, tokens_at_entry)
+                                         total_sold_tokens=tokens_at_entry)
+            pnl_pct, pnl_usd = self._compute_pnl(pos, override_exit_price, tokens_at_entry)
             avg_exit = override_exit_price
 
         pos._last_pnl_pct = pnl_pct
         pos._last_pnl_usd = pnl_usd
-        # Return whether the trade was recorded so the caller can update its local variable.
-        return pnl_pct, pnl_usd, pos._trade_recorded
+        return pnl_pct, pnl_usd
 
     # ── 结算（窗口到期）──────────────────────────────────────────────────────
 
@@ -985,28 +944,13 @@ class PositionManager:
         close_reason: str,
         closed_at_override: Optional[datetime] = None,
         total_sold_tokens: Optional[float] = None,
-        tp_trigger_exit_price: Optional[float] = None,
     ):
         """
         将平仓记录写入 DB (Trade 表) 和 JSONL 备份。
         同时把之前暂存的 Fill 记录的 trade_id 更新为正式 ID。
-
-        partial_pct 取自 pos._pending_partial_pct（由 close_position 设置）：
-        - 全额平仓 → 1.0
-        - 第一阶段止盈 50% → 0.5
-        - 第二阶段止盈 30%（总仓位的 30%）→ 0.3
         """
-        # C1 fix: always use actual avg_exit (exit_price parameter) for PnL recording.
-        # The old logic used tp_trigger_exit_price for TP exits, which distorted PnL
-        # when actual fill price differed from the mid-price at trigger time.
-        record_exit_price = exit_price
-
-        # Use total_sold_tokens when provided (captured at close_position / _close_with_override
-        # entry as tokens_at_entry).  This is the authoritative position size at the time the
-        # close was initiated.  If total_sold_tokens is not provided, fall back to pos.tokens_bought
-        # for backward compatibility.
         filled_tokens = total_sold_tokens if total_sold_tokens is not None else pos.tokens_bought
-        pnl_pct, pnl_usd = self._compute_pnl(pos, record_exit_price, filled_tokens)
+        pnl_pct, pnl_usd = self._compute_pnl(pos, exit_price, filled_tokens)
 
         from app.database import async_session
         from app.models import EntryRecord, ExitRecord, Fill, Trade
@@ -1031,7 +975,7 @@ class PositionManager:
                 asset=pos.asset,
                 condition_id=pos.condition_id,
                 side=pos.side,
-                exit_price=record_exit_price,
+                exit_price=exit_price,
                 tokens_exited=filled_tokens,
                 partial_pct=partial_pct,
                 pnl_pct=pnl_pct,
@@ -1052,7 +996,7 @@ class PositionManager:
                 entry_price=pos.entry_price,
                 effective_entry_price=pos.effective_entry_price,
                 tokens_bought=filled_tokens,
-                exit_price=record_exit_price,
+                exit_price=exit_price,
                 pnl_pct=pnl_pct,
                 pnl_usd=pnl_usd,
                 close_reason=close_reason,

@@ -34,10 +34,6 @@ class MarketInfo:
     # 当前 tick 的 BTC/ETH 美元现货价（实时更新）
     current_spot_price: float = 0.0
 
-    # ── ATR 计算用：最近 N 个 tick 的价格快照 ──────────────────────────
-    # 由 exit_controller._record_price_tick 写入，每次 tick 更新
-    _price_history: list = field(default_factory=list)
-
 
 @dataclass
 class OpenPosition:
@@ -49,9 +45,7 @@ class OpenPosition:
     entry_price: float
     effective_entry_price: float
     tokens_bought: float
-    bet_usdc: float
-    actual_cost_usdc: float
-    taker_fee_bps: int
+    cost_basis: float
     min_exit_price: float
     opened_at: datetime
     window_start: datetime
@@ -62,8 +56,6 @@ class OpenPosition:
     # 平仓重试保护：exit_controller._do_close 检测到平仓失败后设 True，
     # 防止同一次退出事件无限重试。成功或窗口切换后重置。
     _exit_retry_done: bool = False
-    # 平仓已触发标记（窗口过期/强制平仓时置 True，平仓成功后重置）
-    _close_triggered: bool = False
     market: MarketInfo | None = None
 
     # ── 单单持仓止盈止损阈值（由 entry_controller 入场时设置）─────────────
@@ -74,10 +66,6 @@ class OpenPosition:
 
     # ── 入场信息 ────────────────────────────────────────────────────
     entry_core_agree: int = 0
-    # 入场时的锚点偏离百分比
-    entry_anchor_deviation_pct: float = 0.0
-    # 部分止盈已触发（防止同一仓位多次触发部分止盈）
-    _partial_exit_triggered: bool = False
     # 孤儿持仓标记：入场成功但 DB 记录失败时设为 True，下次 startup 的 R11 孤儿检测会处理
     _is_orphan_position: bool = False
     # 关联的 EntryRecord ID（入场时写入，便于出场时关联）；None 表示未关联
@@ -89,7 +77,5 @@ class OpenPosition:
     _trade_recorded_reason: str = ""
     _last_pnl_pct: float = 0.0
     _last_pnl_usd: float = 0.0
-    # 平仓重试标志：True 表示已尝试过一次 retry，防止无限重试
-    _exit_retry_done: bool = False
     # 锚点价（用于部分止盈时的参考价）
-    anchor_price: float = 0.0
+    entry_anchor_deviation_pct: float = 0.0
