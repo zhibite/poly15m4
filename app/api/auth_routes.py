@@ -54,6 +54,16 @@ def _record_failure(username: str):
             _rate_limit[username] = (failures, window_start)
 
 
+def _is_https(request: Request) -> bool:
+    """Detect if the request arrived over HTTPS."""
+    if request.url.scheme == "https":
+        return True
+    forwarded = request.headers.get("X-Forwarded-Proto", "").lower()
+    if forwarded in ("https", "wss"):
+        return True
+    return False
+
+
 @router.get("/has-users")
 async def has_users():
     async with async_session() as db:
@@ -113,7 +123,7 @@ async def login(request: Request, response: Response, body: dict):
         count_row = await db.execute(select(func.count(User.id)))
         total = count_row.scalar() or 0
 
-        # First time: auto-register as admin
+        # First time login: auto-register as admin
         if total == 0:
             user = User(
                 username=username,
@@ -124,7 +134,7 @@ async def login(request: Request, response: Response, body: dict):
             await db.commit()
             await db.refresh(user)
             token = create_access_token({"sub": str(user.id), "username": username, "is_admin": 1})
-            _set_cookie(response, token)
+            _set_cookie(response, token, secure=_is_https(request))
             return {"username": username, "is_admin": 1, "token": token, "first_time": True}
 
         row = await db.execute(select(User).where(User.username == username))
@@ -135,7 +145,7 @@ async def login(request: Request, response: Response, body: dict):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
     token = create_access_token({"sub": str(user.id), "username": username, "is_admin": user.is_admin})
-    _set_cookie(response, token)
+    _set_cookie(response, token, secure=_is_https(request))
     return {"username": user.username, "is_admin": user.is_admin, "token": token}
 
 
@@ -157,7 +167,7 @@ async def me(request: Request):
     return {"username": payload.get("username", ""), "is_admin": payload.get("is_admin", 0)}
 
 
-# ── Generic API rate limiter ──────────────────────────────────────────────────────
+# ── Generic API rate limiter ─────────────────────────────────────────────────────
 
 _generic_rate_limit_lock = threading.Lock()
 _generic_rate_limit: dict[str, tuple[deque, datetime]] = {}

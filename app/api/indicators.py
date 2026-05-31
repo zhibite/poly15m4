@@ -688,14 +688,15 @@ async def get_indicators(asset: str = "BTC"):
         _app(_ema21,         asset, ema21_val)
         _app(_ema_prices,    asset, closes[-1] if closes else 0.0)
         _app(_cvd_history,   asset, cvd_val)
-        _app(_oi_history,    asset, oi_val)
-
-        # CVD cumulative and rolling baseline — also protected by _history_lock
-        _cvd_cum[asset] = cvd_val
-        baseline = _cvd_baseline.setdefault(asset, [])
-        baseline.append(abs(cvd_val))
-        if len(baseline) > _MAX_BASELINE:
-            baseline.pop(0)
+        # OI: write ONLY to module-level _oi_history (shared with get_indicators).
+        # Service-level oi_hist is maintained separately inside IndicatorSignalService.
+        # Guard: only append valid positive OI values to avoid polluting history.
+        if oi_val and oi_val > 0:
+            async with _history_lock:
+                oi_list = _oi_history.setdefault(asset, [])
+                oi_list.append(float(oi_val))
+                if len(oi_list) > HISTORY_SIZE:
+                    oi_list.pop(0)
 
         rsi_hist     = _rsi_history.get(asset, [])
         macd_h_list  = _macd_hist.get(asset, [])
@@ -706,7 +707,8 @@ async def get_indicators(asset: str = "BTC"):
         ema21_list   = _ema21.get(asset, [])
         ema_pr_list  = _ema_prices.get(asset, [])
         cvd_hist     = _cvd_history.get(asset, [])
-    oi_hist      = _oi_history.get(asset, [])
+    # OI history read AFTER the lock to avoid partial-read races.
+    oi_hist = _oi_history.get(asset, [])
 
     oi_change = 0.0
     if len(oi_hist) >= 2 and oi_hist[-1] and oi_hist[-2] and oi_hist[-2] != 0:
@@ -880,11 +882,12 @@ async def get_signal_recommendation(asset: str = "BTC"):
     atr = _calc_atr(highs, lows, closes) if highs else 0.0
     rsi = _calc_rsi(closes) if closes else 50.0
 
-    # OI 变化
+    # OI 变化 — read from shared _oi_history (written only by get_indicators).
+    # Guard: ensure history is long enough for change calculation.
     oi_change = 0.0
-    oi_hist = _oi_history.get(asset, [])
-    if len(oi_hist) >= 2 and oi_hist[-1] and oi_hist[-2] and oi_hist[-2] != 0:
-        oi_change = (oi_hist[-1] - oi_hist[-2]) / oi_hist[-2]
+    oi_hist_read = _oi_history.get(asset, [])
+    if len(oi_hist_read) >= 2 and oi_hist_read[-1] and oi_hist_read[-2] and oi_hist_read[-2] != 0:
+        oi_change = (oi_hist_read[-1] - oi_hist_read[-2]) / oi_hist_read[-2]
 
     # 窗口时间（15min 对齐）
     from datetime import datetime, timezone as _tz
@@ -979,9 +982,11 @@ async def get_signal_recommendation(asset: str = "BTC"):
         "down_mid": round(result.down_mid, 4),
         "spot_price": round(result.spot_price, 2),
         "anchor_deviation_pct": round(result.anchor_deviation_pct * 100, 3),
-        # 动态止盈止损（基于信号强度估算）
+        # 注意：此处的 dynamic_tp/sl_pct 是估算值（strength-based），
+        # 实际执行时的止盈止损阈值由 entry_controller._calc_stop_levels 计算（基于入场价线性映射），
+        # 两者可能存在差异，前端应标注为「估算参考值」而非「实际执行值」。
         "dynamic_tp_pct": round(result.strength * 5 + 20, 1) if result.strength > 0 else 0,
-        "dynamic_sl_pct": round(max(5.0, 15.0 - result.strength), 1) if result.strength > 0 else 0,
+        "dynamic_sl_pct": round(min(5.0, max(5.0, 15.0 - result.strength)), 1) if result.strength > 0 else 0,
         "core_signals": core_items,
         "advanced_signals": advanced_items,
         # 原始指标数据

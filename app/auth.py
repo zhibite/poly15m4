@@ -83,12 +83,12 @@ async def get_current_user(request: Request) -> User:
     return user
 
 
-def _set_cookie(response, token: str):
+def _set_cookie(response, token: str, *, secure: bool = True):
     response.set_cookie(
         key=_COOKIE_NAME,
         value=token,
         httponly=True,
-        samesite="strict",
-        secure=True,
+        samesite="lax",
+        secure=secure,
         max_age=settings.access_token_expire_minutes * 60,
     )

@@ -839,10 +839,10 @@ class IndicatorSignalService:
         # ── ATR ───────────────────────────────────────────────
         atr_val = _calc_atr(highs, lows, closes) if highs else 0.0
 
-        # ── CVD Z-score ──────────────────────────────────────
-        cvd_z = 0.0
-        if cvd_val is not None:
-            cvd_z = await self._cvd_z_score(abs(cvd_val))
+        # CVD Z-score: read-only from the rolling baseline WITHOUT re-appending.
+        # The service maintains its own _CVD_BASELINE internally; calling _cvd_z_score()
+        # here would append a second copy and corrupt the baseline.
+        cvd_z = self._cvd_z_score_ro(abs(cvd_val))
 
         # ── Liquidation ────────────────────────────────────
         liq = _build_liquidation(self.asset, current_price)

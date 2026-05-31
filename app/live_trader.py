@@ -1623,12 +1623,17 @@ class LiveTrader:
                 estimated_gas = int(w3.eth.estimate_gas(fn.build_transaction(base_tx)) * 1.3)
             except Exception as exc:
                 logger.warning(
-                    "redeem gas estimate failed: {} — using conservative fallback gas",
+                    "redeem gas estimate failed: {} — using adaptive fallback gas",
                     exc,
                 )
-                # redeemPositions for 2 token outcomes on Polygon typically needs 300-450k gas.
-                # Use 500k as a safe upper-bound fallback to avoid out-of-gas reverts.
-                estimated_gas = 500_000
+                # redeemPositions for 2 token outcomes on Polygon: ~300-450k typical.
+                # NegRisk tokens may need more. Use dynamic fallback based on token count.
+                num_tokens = 2  # up + down token
+                base_gas = 450_000
+                per_token_gas = 50_000
+                estimated_gas = base_gas + (num_tokens - 1) * per_token_gas
+                # Hard upper bound to prevent runaway gas
+                estimated_gas = min(estimated_gas, 800_000)
 
             latest_block = w3.eth.get_block("latest")
             base_fee = latest_block.get("baseFeePerGas", w3.eth.gas_price)

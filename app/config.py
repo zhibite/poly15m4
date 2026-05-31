@@ -74,3 +74,12 @@ if not settings.jwt_secret_key:
         "JWT_SECRET_KEY is not set in the environment — cannot start without it. "
         "Set it via:  export JWT_SECRET_KEY=$(python -c \"import secrets; print(secrets.token_urlsafe(64))\")"
     )
+
+_jwt_secret = settings.jwt_secret_key.strip()
+if len(_jwt_secret) < 32:
+    raise ValueError(
+        f"JWT_SECRET_KEY is too short ({len(_jwt_secret)} chars) — minimum 32 required. "
+        "Generate a strong key: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
+if _jwt_secret != settings.jwt_secret_key:
+    settings.jwt_secret_key = _jwt_secret
