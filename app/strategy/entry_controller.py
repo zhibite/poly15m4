@@ -61,8 +61,8 @@ class EntryParams:
 
     # ── 止盈止损阈值（per trading-guide.md）─────────────────────────
     # 止盈基础值（概率%，入场价低时更高）
-    tp_base_pct: float = 65.0
-    tp_range_pct: float = 20.0       # 范围：entry_price_min → 100% TP
+    tp_base_pct: float = 10.0
+    tp_range_pct: float = 20.0       # 范围：10% ~ 30% TP
     entry_price_min_tp: float = 0.20
     entry_price_max_tp: float = 0.60
     # 止损基础值（概率%）

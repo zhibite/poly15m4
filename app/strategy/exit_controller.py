@@ -337,38 +337,10 @@ class ExitController:
         """
         pos_side = pos.side
 
-        # ── Gate 1a：Core 6 信号反向早平 ───────────────────────────────
-        # ── Gate 1b：CVD 反向立即平仓（最强单信号，优先级高于 Core 反向）──
-        cvd_reverse = sig.cvd_reverse
-        cvd_z = sig.cvd_z
-
-        if cvd_reverse:
-            sig.gate1_triggered = True
-            sig.gate1_action = "EXIT_NOW"
-            sig.gate1_reason = (
-                f"Gate1: CVD reverse strongest signal Z={cvd_z:.2f}, exit immediately"
-                f" pnl={delta_pct:+.1f}%"
-            )
-            pos.tp_hit = {
-                "kind": ExitReason.STOP_LOSS_EARLY,
-                "gate": "gate1_cvd_reverse",
-                "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
-                "exit_price": current_price,
-                "pnl_pct": round(delta_pct, 2),
-                "realtime_agree": sig.agree_count,
-                "cvd_z": cvd_z,
-                "entry_core_agree": pos.entry_core_agree,
-            }
-            sig.decision = "EXIT_NOW"
-            return ExitSignal(
-                should_exit=True,
-                reason="GATE1_EARLY_EXIT",
-                reason_detail=sig.gate1_reason,
-                tp_hit_data=pos.tp_hit,
-                stop_loss_pct=-10.0,
-            ), sig
-
-        if sig.reverse_count >= 4:
+        # ── Gate 1：Core 6 信号反向早平（>= 3/6 反向即触发）──────────────
+        # 注意：已移除 CVD 反转立即退出（CVD 为 Binance 期货数据，与 Polymarket 无直接相关性，
+        #       直接触发早平可能导致不必要损失）
+        if sig.reverse_count >= 3:
             sig.gate1_triggered = True
             sig.gate1_action = "EXIT_NOW"
             sig.gate1_reason = (
@@ -666,7 +638,7 @@ class ExitController:
             "entry={:.4f} cur={:.4f} pnl={:+.1f}% | "
             "sl=-10% tp={:.1f}% | "
             "atr={:.4f} atr_mult={:.2f} | "
-            "agree={}/6({}) rev={}/6 cvd_rev={}",
+            "agree={}/6({}) rev={}/6",
             pos.asset,
             elapsed_s, window_rem,
             pos.entry_price, current_price,
@@ -674,7 +646,7 @@ class ExitController:
             pos.tp_pct,
             sig.atr_value, sig.atr_mult,
             sig.agree_count, sig.agree_dir,
-            sig.reverse_count, sig.cvd_reverse,
+            sig.reverse_count,
         )
 
         if pnl_pct is None:
@@ -689,9 +661,9 @@ class ExitController:
         if window_rem < 60.0:
             logger.debug(
                 "EXIT CHECK [{}] HOLD (window_end_rem={:.0f}s < 60s) — 信号={}/6 "
-                "rev={}/6 cvd_rev={} pnl={:+.1f}%",
+                "rev={}/6 pnl={:+.1f}%",
                 pos.asset, window_rem,
-                sig.agree_count, sig.reverse_count, sig.cvd_reverse, pnl_pct,
+                sig.agree_count, sig.reverse_count, pnl_pct,
             )
             return ExitSignal(
                 should_exit=False,
