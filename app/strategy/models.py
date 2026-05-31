@@ -45,7 +45,9 @@ class OpenPosition:
     entry_price: float
     effective_entry_price: float
     tokens_bought: float
-    cost_basis: float
+    cost_basis: float = 0.0
+    actual_cost_usdc: float = 0.0
+    taker_fee_bps: int = 0
     min_exit_price: float
     opened_at: datetime
     window_start: datetime
