@@ -780,8 +780,8 @@ class IndicatorSignalService:
         seed = sum(closes[:period]) / period
         result.append(seed)
         for i in range(period, len(closes)):
-        val = result[-1] + (closes[i] - result[-1]) * k
-        result.append(val)
+            val = result[-1] + (closes[i] - result[-1]) * k
+            result.append(val)
         return result
 
     # ── 并发获取 ────────────────────────────────────────────────
