@@ -66,6 +66,8 @@ class OpenPosition:
 
     # ── 入场信息 ────────────────────────────────────────────────────
     entry_core_agree: int = 0
+    # 本次入场实际投入的 USDC 金额
+    bet_usdc: float = 0.0
     # 孤儿持仓标记：入场成功但 DB 记录失败时设为 True，下次 startup 的 R11 孤儿检测会处理
     _is_orphan_position: bool = False
     # 关联的 EntryRecord ID（入场时写入，便于出场时关联）；None 表示未关联
