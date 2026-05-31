@@ -395,13 +395,13 @@ class ExitController:
             ), sig
 
         # ── Gate 2：TP 阈值到达时信号续持检查 ──────────────────────────────
-        if delta_pct >= sig.dynamic_tp:
+        if delta_pct >= pos.tp_pct:
             if sig.agree_count >= 3:
                 sig.gate2_triggered = True
                 sig.gate2_action = "CONTINUE"
                 sig.gate2_reason = (
                     f"Gate2: TP hit(+{delta_pct:.1f}%) but signal aligned {sig.agree_count}/6, "
-                    f"skip TP, continue holding"
+                    f"skip TP (tp_pct={pos.tp_pct:.1f}%), continue holding"
                 )
                 return ExitSignal(
                     should_exit=False,
@@ -424,7 +424,7 @@ class ExitController:
             logger.info(
                 "GATE3 EXIT [{}] {} agree={}/6 pnl={:.1f}% entry={:.4f} cur={:.4f}",
                 pos.asset, pos_side.value, sig.agree_count, delta_pct,
-                entry_price, current_price,
+                pos.entry_price, current_price,
             )
             return ExitSignal(
                 should_exit=True,
@@ -460,7 +460,7 @@ class ExitController:
             信号不足 < 3  → 全部止损退出
 
         止盈逻辑（单一阈值）：
-          PnL >= dynamic_tp → 检查信号
+          PnL >= pos.tp_pct → 检查信号
             信号同向 >= 3 → 跳过，继续持有
             信号不足     → 触发全部止盈
         """
@@ -531,19 +531,19 @@ class ExitController:
                 ), sig
 
         # ── 单一止盈阈值：达到 → 信号确认 → 触发或跳过 ──────────────────────
-        if pnl_pct >= sig.dynamic_tp:
+        if pnl_pct >= pos.tp_pct:
             if sig.agree_count >= 3:
                 # 信号仍同向 → 跳过止盈，继续持有
                 logger.info(
                     "EXIT CHECK [{}] {} TP hit but SKIP (信号续持): "
                     "pnl={:.1f}% tp={:.1f}% agree={}/6 — HOLD",
-                    pos.asset, pos.side.value, pnl_pct, sig.dynamic_tp, sig.agree_count,
+                    pos.asset, pos.side.value, pnl_pct, pos.tp_pct, sig.agree_count,
                 )
                 return ExitSignal(
                     should_exit=False,
                     reason="TP_SKIP",
                     reason_detail=(
-                        f"止盈阈值 pnl={pnl_pct:.1f}%>={sig.dynamic_tp:.1f}% 但信号同向 "
+                        f"止盈阈值 pnl={pnl_pct:.1f}%>={pos.tp_pct:.1f}% 但信号同向 "
                         f"agree={sig.agree_count}/6>=3，继续持有"
                     ),
                     stop_loss_pct=-10.0,
@@ -557,7 +557,7 @@ class ExitController:
                 "elapsed_sec": round((now - pos.window_start).total_seconds(), 1),
                 "exit_price": current_price,
                 "pnl_pct": round(pnl_pct, 2),
-                "dynamic_tp": sig.dynamic_tp,
+                "tp_pct": pos.tp_pct,
                 "atr_mult": sig.atr_mult,
                 "entry_core_agree": pos.entry_core_agree,
                 "realtime_agree": sig.agree_count,
@@ -565,13 +565,13 @@ class ExitController:
             logger.info(
                 "EXIT CHECK [{}] {} TP hit: pnl={:.1f}% tp={:.1f}% "
                 "atr_mult={:.2f} entry_agree={}/6 realtime_agree={}/6",
-                pos.asset, pos.side.value, pnl_pct, sig.dynamic_tp,
+                pos.asset, pos.side.value, pnl_pct, pos.tp_pct,
                 sig.atr_mult, pos.entry_core_agree, sig.agree_count,
             )
             return ExitSignal(
                 should_exit=True,
                 reason="TP",
-                reason_detail=f"止盈触发 pnl={pnl_pct:.1f}%>={sig.dynamic_tp:.1f}%",
+                reason_detail=f"止盈触发 pnl={pnl_pct:.1f}%>={pos.tp_pct:.1f}%",
                 tp_hit_data=pos.tp_hit,
                 stop_loss_pct=-10.0,
                 take_profit_pct=pos.tp_pct,
@@ -671,7 +671,7 @@ class ExitController:
             elapsed_s, window_rem,
             pos.entry_price, current_price,
             pnl_pct if pnl_pct else 0.0,
-            sig.dynamic_tp,
+            pos.tp_pct,
             sig.atr_value, sig.atr_mult,
             sig.agree_count, sig.agree_dir,
             sig.reverse_count, sig.cvd_reverse,
