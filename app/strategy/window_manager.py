@@ -26,11 +26,12 @@ class WindowManager:
     统一管理所有品种的窗口生命周期。
     """
 
-    def __init__(self, market_svc: MarketService, symbols: list[str], entry_ctrl=None, decision_logger=None):
+    def __init__(self, market_svc: MarketService, symbols: list[str], entry_ctrl=None, decision_logger=None, end_strategy=None):
         self._svc = market_svc
         self._symbols = symbols
         self._entry_ctrl = entry_ctrl
         self._decision_logger = decision_logger
+        self._end_strategy = end_strategy
         self._ctxs: Dict[str, WindowContext] = {
             s: WindowContext(
                 asset=s,
@@ -109,6 +110,9 @@ class WindowManager:
                 ctx.market._down_mid = down_mid
             ctx.price_snapshot = PriceSnapshot(up_mid=up_mid, down_mid=down_mid)
 
+            # 末端策略：每分钟追加 UP 价格采样（用于 D3 动能 + D4 反转检测）
+            ctx.append_up_sample(up_mid)
+
             # Log new-window discovery WITH real CLOB mid prices (after fetch_prices)
             if asset in new_window_assets and ctx.condition_id and ctx.market:
                 logger.info(
@@ -143,34 +147,28 @@ class WindowManager:
         ctx.window_end = mkt.window_end
         ctx.market = mkt
 
-        # Clear stale neg_risk cache entries for the previous window
         if prev_id and prev_id != mkt.condition_id:
             self._svc.clear_neg_risk_cache(prev_id)
 
         ctx.reset_for_new_window()
-
-        # 窗口切换时无条件重置 _window_skipped 和正确 elapsed 值。
-        # Defensively guard against None in case initialization order changes.
-        if self._entry_ctrl is not None:
-            self._entry_ctrl.reset_window_skipped(ctx.asset)
-            # 新窗口开启时的真实 elapsed = now - window_start
-            # 注意：mkt.window_start 已经是 UTC aware datetime
-            now = datetime.now(timezone.utc)
-            fresh_elapsed = (now - mkt.window_start).total_seconds()
-            if fresh_elapsed < 0:
-                fresh_elapsed = 0.0
-            self._entry_ctrl.set_fresh_elapsed(ctx.asset, fresh_elapsed)
 
         if prev_id and prev_id != mkt.condition_id:
             logger.info(
                 "window_mgr {} window changed: {} -> {}",
                 ctx.asset, prev_id[:12], mkt.condition_id[:12],
             )
-            # Cancel stale resolution tracking for the old condition_id so we stop
-            # polling the old (now-invalid) market and polluting logs with 422 errors.
             if self._decision_logger is not None:
                 self._decision_logger.cancel_tracking(prev_id)
+            if self._end_strategy is not None:
+                self._end_strategy.reset(ctx.asset)
         # NOTE: window metadata (open_up/down) is available immediately,
         # but _up_mid/_down_mid are only populated after fetch_prices in tick().
         # The combined "new_window" log is printed in tick() after fetch_prices
         # so it shows real CLOB mid prices, not the 0.0 default.
+        if self._entry_ctrl is not None:
+            self._entry_ctrl.reset_window_skipped(ctx.asset)
+            now = datetime.now(timezone.utc)
+            fresh_elapsed = (now - mkt.window_start).total_seconds()
+            if fresh_elapsed < 0:
+                fresh_elapsed = 0.0
+            self._entry_ctrl.set_fresh_elapsed(ctx.asset, fresh_elapsed)

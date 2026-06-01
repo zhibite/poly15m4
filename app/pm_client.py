@@ -328,6 +328,70 @@ class PolymarketClient:
             logger.debug("get_market_info({}) failed: {}", token_id[:12], e)
             return None
 
+    # ── Orderbook ─────────────────────────────────────────────────────────────
+
+    async def get_orderbook(self, token_id: str) -> Optional[dict]:
+        """
+        获取单个 token 的完整盘口（bids / asks）。
+
+        REST: GET /book?token_id=<token_id>
+        公开接口，无需认证。
+
+        返回结构示例：
+        {
+            "market": "0x...",
+            "asset_id": "0x...",
+            "timestamp": "1234567890",
+            "hash": "...",
+            "bids": [{"price": "0.45", "size": "100"}, ...],
+            "asks": [{"price": "0.46", "size": "150"}, ...],
+            "min_order_size": "1",
+            "tick_size": "0.01",
+            "neg_risk": False,
+            "last_trade_price": "0.45",
+        }
+        """
+        c = await self._client()
+        try:
+            resp = await c.get(
+                f"{self.settings.polymarket_host}/book",
+                params={"token_id": token_id},
+                timeout=5.0,
+            )
+            if resp.status_code == 404:
+                logger.debug("get_orderbook({}) → 404, no orderbook yet", token_id[:12])
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.debug("get_orderbook({}) failed: {}", token_id[:12], e)
+            return None
+
+    async def get_orderbooks_batch(self, token_ids: list[str]) -> list[dict]:
+        """
+        批量获取多个 token 的盘口。
+
+        REST: POST /books
+        公开接口，无需认证。
+        最多一次 500 个 token。
+
+        返回: [orderbook, ...] 列表，无数据的 token 对应空 dict 或 None。
+        """
+        if not token_ids:
+            return []
+        c = await self._client()
+        try:
+            resp = await c.post(
+                f"{self.settings.polymarket_host}/books",
+                json=[{"token_id": tid} for tid in token_ids],
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.debug("get_orderbooks_batch({} tokens) failed: {}", len(token_ids), e)
+            return []
+
 
 def parse_window_end(market: dict | None) -> Optional[datetime]:
     if not market:
@@ -338,3 +402,187 @@ def parse_window_end(market: dict | None) -> Optional[datetime]:
 
 async def safe_gather(*coros):
     return await asyncio.gather(*coros, return_exceptions=True)
+
+
+# ── 滑点估算 ───────────────────────────────────────────────────────────────
+
+@dataclass
+class SlippageEstimate:
+    """
+    滑点估算结果。
+
+    所有价格均为概率值（0~1），如 0.78 表示 78% 胜率。
+
+    fill_price  基于盘口档位估算的实际成交价
+    slippage_pct  滑点百分比（相对决策价的百分比）
+    pct_of_depth  投入占盘口深度的比例（>100% = 超出流动性）
+    sufficient  盘口深度是否足够（可用档位至少覆盖 min_coverage × stake）
+    """
+    fill_price: float       # 估算成交价
+    slippage_pct: float     # 滑点（%，正数 = 对买方不利）
+    pct_of_depth: float      # 投入占深度比例
+    sufficient: bool        # 深度是否足够
+    depth_at_fill: float    # 成交位置的深度（可用 token 数）
+    levels_used: int        # 消耗的档位数
+    error: str = ""         # 估算失败原因
+
+
+async def estimate_buy_slippage(
+    token_id: str,
+    stake_usdc: float,
+    *,
+    pm_client: "PolymarketClient",
+    min_coverage: float = 2.0,
+) -> SlippageEstimate:
+    """
+    估算市价买入指定 token 的滑点。
+
+    遍历盘口 asks（从低到高），逐档消耗直到覆盖 stake_usdc，
+    估算加权平均成交价和实际滑点。
+
+    min_coverage: 要求盘口深度至少是投入的多少倍（默认 2x）
+    """
+    book = await pm_client.get_orderbook(token_id)
+    if not book:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="no_orderbook",
+        )
+
+    asks = book.get("asks") or []
+    if not asks:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="no_asks",
+        )
+
+    # 解析 asks: [{"price": "0.46", "size": "150"}, ...]
+    # size 是 token 数量（概率单位），不是美元
+    filled_cost = 0.0
+    filled_tokens = 0.0
+    levels_used = 0
+
+    for level in asks:
+        price = float(level.get("price", 0))
+        size = float(level.get("size", 0))
+        if price <= 0 or size <= 0:
+            continue
+
+        level_cost = price * size
+        if filled_cost + level_cost <= stake_usdc:
+            filled_cost += level_cost
+            filled_tokens += size
+            levels_used += 1
+        else:
+            remaining = stake_usdc - filled_cost
+            remaining_tokens = remaining / price if price > 0 else 0
+            filled_cost += remaining
+            filled_tokens += remaining_tokens
+            levels_used += 1
+            break
+
+    if filled_tokens <= 0:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=levels_used,
+            error="empty_book",
+        )
+
+    fill_price = filled_cost / filled_tokens
+
+    # 滑点 = 相对最佳卖价的损耗（%）
+    best_ask = float(asks[0].get("price", 0)) if asks else fill_price
+    slippage_pct = abs(fill_price - best_ask) / best_ask * 100.0 if best_ask > 1e-9 else 0.0
+
+    pct_of_depth = filled_cost / stake_usdc if stake_usdc > 0 else 0
+    sufficient = pct_of_depth >= min_coverage
+
+    return SlippageEstimate(
+        fill_price=fill_price,
+        slippage_pct=slippage_pct,
+        pct_of_depth=pct_of_depth,
+        sufficient=sufficient,
+        depth_at_fill=filled_tokens,
+        levels_used=levels_used,
+    )
+
+
+async def estimate_sell_slippage(
+    token_id: str,
+    tokens: float,
+    *,
+    pm_client: "PolymarketClient",
+    min_coverage: float = 2.0,
+) -> SlippageEstimate:
+    """
+    估算市价卖出 token 的滑点。
+
+    遍历盘口 bids（从高到低），逐档消耗直到卖出 tokens，
+    估算加权平均成交价和实际滑点。
+    """
+    book = await pm_client.get_orderbook(token_id)
+    if not book:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="no_orderbook",
+        )
+
+    bids = book.get("bids") or []
+    if not bids:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="no_bids",
+        )
+
+    filled_cost = 0.0
+    filled_tokens = 0.0
+    levels_used = 0
+
+    for level in bids:
+        price = float(level.get("price", 0))
+        size = float(level.get("size", 0))
+        if price <= 0 or size <= 0:
+            continue
+
+        consume = min(size, tokens - filled_tokens)
+        filled_cost += price * consume
+        filled_tokens += consume
+        levels_used += 1
+
+        if filled_tokens >= tokens - 1e-9:
+            break
+
+    if filled_tokens <= 0:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="empty_book",
+        )
+
+    fill_price = filled_cost / filled_tokens
+
+    # 滑点 = 相对最佳买价的损耗（%）
+    best_bid = float(bids[0].get("price", 0)) if bids else fill_price
+    slippage_pct = abs(best_bid - fill_price) / best_bid * 100.0 if best_bid > 1e-9 else 0.0
+
+    pct_of_depth = filled_tokens / tokens if tokens > 0 else 0
+    sufficient = pct_of_depth >= min_coverage
+
+    return SlippageEstimate(
+        fill_price=fill_price,
+        slippage_pct=slippage_pct,
+        pct_of_depth=pct_of_depth,
+        sufficient=sufficient,
+        depth_at_fill=filled_tokens,
+        levels_used=levels_used,
+    )

@@ -36,6 +36,7 @@ from app.strategy.window_context import WindowContext
 from app.strategy.window_manager import WindowManager
 from app.strategy.models import MarketInfo, OpenPosition
 from app.strategy.indicator_signal_service import IndicatorSignalService
+from app.strategy.end_window_strategy import EndWindowStrategy
 
 
 class SinglePositionStrategy:
@@ -57,6 +58,7 @@ class SinglePositionStrategy:
         self._wm: Optional[WindowManager] = None
         # 类型：dict[str, IndicatorSignalService]，key 为 "BTC" / "ETH"
         self._ind_svc: dict[str, IndicatorSignalService] = {}
+        self._end_strategy: Optional[EndWindowStrategy] = None
 
         self._running: bool = False
         self._running_lock = asyncio.Lock()
@@ -127,6 +129,10 @@ class SinglePositionStrategy:
                 self._entry_ctrl._live_trader = trader
             if self._exit_ctrl is not None:
                 self._exit_ctrl._live_trader = trader
+            # end_strategy.tick() receives live_trader as a parameter from run_forever,
+            # but we also store it here so _do_close can access it asynchronously.
+            if self._end_strategy is not None:
+                self._end_strategy._live_trader = trader
 
     def _symbols_enabled(self) -> list[str]:
         cfg = get_config()
@@ -155,6 +161,14 @@ class SinglePositionStrategy:
             a: IndicatorSignalService(asset=a) for a in ("BTC", "ETH")
         }
         self._logger = DecisionLogger(self.pm)
+        self._pos_mgr = PositionManager(self.pm)
+        self._exit_ctrl = ExitController(
+            pos_mgr=self._pos_mgr,
+            wm=self._wm,
+            decision_logger=self._logger,
+        )
+        # 末端策略必须在 _exit_ctrl 之后创建，以便注入 pos_mgr
+        self._end_strategy = EndWindowStrategy(pos_mgr=self._pos_mgr, pm=self.pm)
         self._entry_ctrl = EntryController(
             pm=self.pm,
             market_svc=self._market_svc,
@@ -162,12 +176,11 @@ class SinglePositionStrategy:
             logger=self._logger,
             signal_svc=self._ind_svc,
         )
-        self._wm = WindowManager(self._market_svc, self.ALL_SYMBOLS, entry_ctrl=self._entry_ctrl, decision_logger=self._logger)
-        self._pos_mgr = PositionManager(self.pm)
-        self._exit_ctrl = ExitController(
-            pos_mgr=self._pos_mgr,
-            wm=self._wm,
+        self._wm = WindowManager(
+            self._market_svc, self.ALL_SYMBOLS,
+            entry_ctrl=self._entry_ctrl,
             decision_logger=self._logger,
+            end_strategy=self._end_strategy,
         )
 
     def _sync_config(self):
@@ -199,6 +212,8 @@ class SinglePositionStrategy:
             self._entry_ctrl.sync_params(cfg)
         if self._exit_ctrl:
             self._exit_ctrl.sync_params(cfg)
+        if self._end_strategy:
+            self._end_strategy.sync_params(cfg)
 
         if self._live_trader is not None:
             self._live_trader.slippage_pct = float(self.live_slippage_pct)
@@ -378,6 +393,37 @@ class SinglePositionStrategy:
                     if ctx.position is not None and getattr(ctx.position, "_pending_close", False):
                         continue
                     await self._entry_ctrl.check_entry(asset, ctx)
+
+                # 3. 末端策略 tick（T=12min~14.5min，独立入场/退出）
+                if self._end_strategy:
+                    cfg = get_config()
+                    if cfg.get("end_enabled", False):
+                        end_ops = [
+                            a for a in ("BTC", "ETH")
+                            if cfg.get(f"end_asset_{a.lower()}_enabled", True)
+                        ]
+                        for asset in end_ops:
+                            ctx = ctxs.get(asset)
+                            if not ctx or not ctx.market:
+                                continue
+                            sig_result = self._latest_indicators.get(asset)
+                            main_has_pos = (
+                                ctx.position is not None
+                                if ctxs.get(asset) else False
+                            )
+                            main_dir = (
+                                ctx.position.side.value
+                                if ctx.position else "NONE"
+                            )
+                            await self._end_strategy.tick(
+                                asset=asset,
+                                ctx=ctx,
+                                indicator_signal_result=sig_result,
+                                main_has_position=main_has_pos,
+                                main_direction=main_dir,
+                                live_trader=self._live_trader if self.live_mode else None,
+                                market_duration_sec=float(self.market_duration_sec),
+                            )
 
                 # 3. FOK 重试
                 await self._entry_ctrl.fire_entry_retries(ctxs)

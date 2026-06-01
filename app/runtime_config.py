@@ -109,6 +109,29 @@ _runtime: dict = {
     "entry_price_max_tp":     float(_env("TP_ENTRY_PRICE_MAX", "0.60")),
     # 止损（固定 -10%）
     "sl_base_pct":            float(_env("SL_BASE_PCT", "-10.0")),
+
+    # ── 流动性过滤 ─────────────────────────────────────────────────────────
+    "min_depth_coverage":     float(_env("MIN_DEPTH_COVERAGE", "2.0")),
+    "max_slippage_pct":      float(_env("MAX_SLIPPAGE_PCT", "3.0")),
+    "obi_contradict_skip":   float(_env("OBI_CONTRADICT_SKIP", "0.25")),
+
+    # ── 末端顺势策略（end_window_strategy）─────────────────────────────
+    "end_enabled":                    _env_bool("END_ENABLED", False),
+    "end_asset_btc_enabled":           _env_bool("END_ASSET_BTC_ENABLED", True),
+    "end_asset_eth_enabled":          _env_bool("END_ASSET_ETH_ENABLED", True),
+    "end_window_start_sec":            float(_env("END_WINDOW_START_SEC", "720.0")),
+    "end_window_end_sec":              float(_env("END_WINDOW_END_SEC", "870.0")),
+    "end_hardcut_sec":                float(_env("END_HARDCUT_SEC", "885.0")),
+    "end_min_entry_price":             float(_env("END_MIN_ENTRY_PRICE", "0.70")),
+    "end_confidence_threshold":        float(_env("END_CONFIDENCE_THRESHOLD", "50.0")),
+    "end_reversal_stop_pct":           float(_env("END_REVERSAL_STOP_PCT", "0.05")),
+    "end_tp_min_pct":                 float(_env("END_TP_MIN_PCT", "10.0")),
+    "end_tp_max_pct":                 float(_env("END_TP_MAX_PCT", "30.0")),
+    "end_tp_entry_min":               float(_env("END_TP_ENTRY_MIN", "0.70")),
+    "end_tp_entry_max":               float(_env("END_TP_ENTRY_MAX", "0.90")),
+    "end_sl_pct":                    float(_env("END_SL_PCT", "-15.0")),
+    "end_base_position_usdc":         float(_env("END_BASE_POSITION_USDC", "4.0")),
+    "end_max_daily_loss":             float(_env("END_MAX_DAILY_LOSS", "-20.0")),
 }
 
 _ENV_KEYS: dict[str, str] = {
@@ -139,6 +162,29 @@ _ENV_KEYS: dict[str, str] = {
     "entry_price_min_tp":             "TP_ENTRY_PRICE_MIN",
     "entry_price_max_tp":             "TP_ENTRY_PRICE_MAX",
     "sl_base_pct":             "SL_BASE_PCT",
+
+    # 流动性过滤
+    "min_depth_coverage":      "MIN_DEPTH_COVERAGE",
+    "max_slippage_pct":       "MAX_SLIPPAGE_PCT",
+    "obi_contradict_skip":    "OBI_CONTRADICT_SKIP",
+
+    # 末端顺势策略
+    "end_enabled":                    "END_ENABLED",
+    "end_asset_btc_enabled":          "END_ASSET_BTC_ENABLED",
+    "end_asset_eth_enabled":         "END_ASSET_ETH_ENABLED",
+    "end_window_start_sec":           "END_WINDOW_START_SEC",
+    "end_window_end_sec":             "END_WINDOW_END_SEC",
+    "end_hardcut_sec":               "END_HARDCUT_SEC",
+    "end_min_entry_price":            "END_MIN_ENTRY_PRICE",
+    "end_confidence_threshold":       "END_CONFIDENCE_THRESHOLD",
+    "end_reversal_stop_pct":          "END_REVERSAL_STOP_PCT",
+    "end_tp_min_pct":                "END_TP_MIN_PCT",
+    "end_tp_max_pct":                "END_TP_MAX_PCT",
+    "end_tp_entry_min":              "END_TP_ENTRY_MIN",
+    "end_tp_entry_max":              "END_TP_ENTRY_MAX",
+    "end_sl_pct":                   "END_SL_PCT",
+    "end_base_position_usdc":        "END_BASE_POSITION_USDC",
+    "end_max_daily_loss":            "END_MAX_DAILY_LOSS",
 }
 
 # 缓存上次返回的深拷贝，仅当 _runtime 实际更新后才重新生成。

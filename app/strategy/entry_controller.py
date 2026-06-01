@@ -18,7 +18,8 @@ from typing import Optional
 from loguru import logger
 
 from app.models import Side
-from app.pm_client import PolymarketClient
+from app.pm_client import PolymarketClient, estimate_buy_slippage
+from app.strategy.end_window_signal import compute_liquidity_confidence
 from app.strategy.models import MarketInfo, OpenPosition
 from app.strategy.decision_logger import DecisionLogger
 from app.strategy.window_context import WindowContext
@@ -58,6 +59,11 @@ class EntryParams:
     # 绝对价格区间（入场时 UP/DOWN 价格必须在此范围内）
     entry_price_min: float = 0.20
     entry_price_max: float = 0.60
+
+    # ── 流动性过滤 ───────────────────────────────────────────────────
+    min_depth_coverage: float = 2.0    # 盘口深度至少是投入的多少倍（默认 2x）
+    max_slippage_pct: float = 3.0      # 最大容忍滑点（%，超出则跳过）
+    obi_contradict_skip: float = 0.25  # OBI 与方向矛盾时跳过（默认 0.25：做 UP 但 OBI<-0.25 则跳过）
 
     # ── 止盈止损阈值（per trading-guide.md）─────────────────────────
     # 止盈基础值（概率%，入场价低时更高）
@@ -146,6 +152,11 @@ class EntryController:
         p.entry_late_cutoff_elapsed_sec = float(cfg.get("entry_late_cutoff_elapsed_sec", 540.0))
         p.entry_price_min = float(cfg.get("entry_price_min", 0.20))
         p.entry_price_max = float(cfg.get("entry_price_max", 0.60))
+
+        # 流动性过滤参数
+        p.min_depth_coverage = float(cfg.get("min_depth_coverage", 2.0))
+        p.max_slippage_pct = float(cfg.get("max_slippage_pct", 3.0))
+        p.obi_contradict_skip = float(cfg.get("obi_contradict_skip", 0.25))
 
         # 止盈止损阈值
         p.tp_base_pct = float(cfg.get("tp_base_pct", 65.0))
@@ -316,7 +327,7 @@ class EntryController:
             )
             return EntryResult(reason="no_signal", signal_result=sig)
 
-        # ── Step 3: 确定方向 ────────────────────────────────────────────
+        # ── Step 3: 确定方向和边 ────────────────────────────────────────────
         if sig.direction == SignalDir.UP:
             side = Side.UP
             direction = "UP"
@@ -341,6 +352,29 @@ class EntryController:
                 asset, direction, price, p.entry_price_max,
             )
             return EntryResult(reason="no_signal", signal_result=sig)
+
+        # ── Step 4b: OBI 方向过滤 ──────────────────────────────────────
+        obi_logged = False
+        book = await self._pm.get_orderbook(
+            mkt.token_up_id if side == Side.UP else mkt.token_down_id
+        )
+        if book:
+            D5, obi, depth_factor, depth_ok = compute_liquidity_confidence(
+                book, direction,
+            )
+            obi_logged = True
+            if direction == "UP" and obi < -abs(p.obi_contradict_skip):
+                logger.info(
+                    "check_entry [{}] SKIP: {} OBI={:+.2f}（卖方主导，与 UP 矛盾）",
+                    asset, direction, obi,
+                )
+                return EntryResult(reason="obi_contradict", signal_result=sig)
+            if direction == "DOWN" and obi > abs(p.obi_contradict_skip):
+                logger.info(
+                    "check_entry [{}] SKIP: {} OBI={:+.2f}（买方主导，与 DOWN 矛盾）",
+                    asset, direction, obi,
+                )
+                return EntryResult(reason="obi_contradict", signal_result=sig)
 
         # ── Step 5: 确定仓位（按 Core 6 共识数量，基准 4U）─────────────────
         # 6/6 → 8U（2×），5/6 → 6U（1.5×），4/6 → 4U（1×），3/6 → 2U（0.5×）
@@ -394,6 +428,7 @@ class EntryController:
             try:
                 success = await self._do_entry(
                     asset, ctx, side, direction, price, stake, elapsed,
+                    orderbook=book,
                 )
                 if success:
                     return EntryResult(
@@ -434,6 +469,8 @@ class EntryController:
         price: float,
         stake: float,
         elapsed: float,
+        *,
+        orderbook: dict | None = None,
     ) -> bool:
         """实际执行入场（live 或 dry）"""
         mkt = ctx.market
@@ -448,6 +485,21 @@ class EntryController:
             logger.warning("fee_rate_bps unavailable — using default {} bps", fee_rate_bps)
 
         if p.live_mode and self._live_trader:
+            # 用盘口估算动态滑点，超限则跳过
+            if orderbook:
+                slip_est = await estimate_buy_slippage(token_id, stake, pm_client=self._pm)
+                if not slip_est.error:
+                    slip = max(slip_est.slippage_pct, 0.5)
+                    if slip > p.max_slippage_pct:
+                        logger.info(
+                            "ENTRY skip [{}] {} slip_est={:.2f}% > max={:.1f}%",
+                            asset, direction, slip, p.max_slippage_pct,
+                        )
+                        return False
+                    logger.debug(
+                        "ENTRY [{}] {} slip_est={:.2f}% depth={:.1f}x sufficient={}",
+                        asset, direction, slip, slip_est.pct_of_depth, slip_est.sufficient,
+                    )
             return await self._live_entry(
                 asset, ctx, side, direction, price, stake, elapsed, slip, fee_rate_bps,
             )

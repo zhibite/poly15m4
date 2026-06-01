@@ -197,6 +197,70 @@ def _sec_remaining(sec: float) -> str:
     return f"{sec/60:.1f}min" if sec >= 60 else f"{sec:.0f}s"
 
 
+def _count_core_agree(
+    rsi_val: float,
+    rsi_crossed_up: bool,
+    rsi_crossed_down: bool,
+    macd_hist_positive: bool,
+    vwap_sig: str,
+    ema_cross: str,
+    pivot_sig: str,
+    bbands_sig: str,
+) -> int:
+    """
+    计算 Core 6 指标中同意主方向的数量。
+    与 _calc_core_signals 中的 agree 判断逻辑保持一致。
+
+    agree 条件：
+      RSI: 极端反转时（crossed_up → UP，crossed_down → DOWN）
+      MACD: 直方图正向放大 → UP，负向放大 → DOWN
+      VWAP: 价格在 VWAP 上方且 RSI>50+MACD 同向 → UP，
+             价格在 VWAP 下方且 RSI<50+MACD 同向 → DOWN
+      EMA: 金叉 → UP，死叉 → DOWN
+      Pivot: 突破高点 → UP，跌破低点 → DOWN
+      BBands: 触及上轨 → UP，触及下轨 → DOWN
+    """
+    count = 0
+
+    # RSI
+    if rsi_crossed_up:
+        count += 1
+    elif rsi_crossed_down:
+        count += 1
+
+    # MACD
+    if macd_hist_positive:
+        count += 1
+
+    # VWAP（需要 RSI 偏多/偏空 + MACD 同向才 agree）
+    if vwap_sig == "above":
+        if rsi_val > 50 and macd_hist_positive:
+            count += 1
+    elif vwap_sig == "below":
+        if rsi_val < 50 and not macd_hist_positive:
+            count += 1
+
+    # EMA
+    if ema_cross == "golden":
+        count += 1
+    elif ema_cross == "death":
+        count += 1
+
+    # Pivot
+    if pivot_sig == "above":
+        count += 1
+    elif pivot_sig == "below":
+        count += 1
+
+    # BBands
+    if bbands_sig == "upper_touch":
+        count += 1
+    elif bbands_sig == "lower_touch":
+        count += 1
+
+    return count
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 全局滚动历史（模块级别，跨实例共享，支持多币种）
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1137,8 +1201,8 @@ class IndicatorSignalService:
                 "upper":  round(bb_upper, 4),
                 "lower":  round(bb_lower, 4),
                 "signal": (
-                    "upper_touch" if current_price >= bb_upper * 0.9995
-                    else "lower_touch" if current_price <= bb_lower * 1.0005
+                    "upper_touch" if current_price >= bb_upper * (1 - BBANDS_TOUCH_PCT)
+                    else "lower_touch" if current_price <= bb_lower * (1 + BBANDS_TOUCH_PCT)
                     else "within"
                 ),
             },
@@ -1192,5 +1256,21 @@ class IndicatorSignalService:
                 "history":       [round(v, 0) for v in oi_h[-30:]],
             },
             "atr": round(atr_val, 4),
+            # Core 6 共识数量（末端策略 D1 维度需要）
+            # 各指标确认主方向的计数：UP 方向确认 +1，DOWN 方向确认 +1
+            "core_agree": _count_core_agree(
+                rsi_val=rsi_val,
+                rsi_crossed_up=rsi_crossed_up,
+                rsi_crossed_down=rsi_crossed_down,
+                macd_hist_positive=(macd_hist[-1] > 0) if macd_hist else False,
+                vwap_sig=vwap_sig,
+                ema_cross=ema_cross,
+                pivot_sig=pivot_sig,
+                bbands_sig=(
+                    "upper_touch" if current_price >= bb_upper * (1 - 0.0005)
+                    else "lower_touch" if current_price <= bb_lower * (1 + 0.0005)
+                    else "within"
+                ) if bb_upper > 0 else "within",
+            ),
         }
 

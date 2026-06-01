@@ -68,6 +68,12 @@ class WindowContext:
     # 标记本 tick 内窗口是否刚切换（新窗口的第一 tick 跳过 elapsed cutoff 检查）
     is_fresh: bool = field(default=False)
 
+    # ── 末端策略：UP 价格采样序列（每分钟追加一条，用于 D3 和 D4）──────────
+    # 保留最近 16 条（T=15min = 15 条 + 1 条缓冲）
+    up_samples: list[float] = field(default_factory=list)
+    # 上次追加时的 UTC 分钟数（避免每 tick 重复追加同一条价格）
+    _last_append_minute: int = field(default_factory=-1, repr=False)
+
     # ── 便捷属性 ──────────────────────────────────────────────────────────
 
     @property
@@ -117,6 +123,8 @@ class WindowContext:
         self.position = None
         self._pending_close = False
         self.is_fresh = True
+        self.up_samples.clear()
+        self._last_append_minute = -1
 
     def elapsed(self, now: Optional[datetime] = None) -> float:
         if now is None:
@@ -144,3 +152,15 @@ class WindowContext:
 
     def is_late(self, cutoff_sec: float) -> bool:
         return self.elapsed() >= cutoff_sec - 1e-9
+
+    # ── 末端策略：UP 价格采样 ────────────────────────────────────────────
+
+    def append_up_sample(self, up_mid: float) -> None:
+        """每分钟追加一条 UP 中价采样（去重：同分钟内不重复追加）"""
+        current_minute = datetime.now(timezone.utc).minute
+        if current_minute == self._last_append_minute:
+            return
+        self._last_append_minute = current_minute
+        self.up_samples.append(up_mid)
+        if len(self.up_samples) > 16:
+            self.up_samples = self.up_samples[-16:]
