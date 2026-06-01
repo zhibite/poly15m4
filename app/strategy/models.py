@@ -45,13 +45,13 @@ class OpenPosition:
     entry_price: float
     effective_entry_price: float
     tokens_bought: float
-    cost_basis: float = 0.0
-    actual_cost_usdc: float = 0.0
-    taker_fee_bps: int = 0
     min_exit_price: float
     opened_at: datetime
     window_start: datetime
     window_end: datetime
+    cost_basis: float = 0.0
+    actual_cost_usdc: float = 0.0
+    taker_fee_bps: int = 0
     sell_retry_count: int = 0
     # Prevent _check_exit from re-triggering close while a close is already in progress
     _pending_close: bool = False
