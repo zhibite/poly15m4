@@ -94,6 +94,7 @@ async def lifespan(app: FastAPI):
     bot_task.add_done_callback(_handle_task_exception)
     app.state.bot_task = bot_task
     logger.info("Strategy loop started (background).")
+    await strategy.start()
 
     yield
 
