@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     jwt_secret_key: str = ""  # MUST be set via environment variable, NOT in .env file
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
+    # Web 登录管理员（推荐通过 Coolify / 系统环境变量设置）。
+    # 设置 WEB_PASSWORD 后，启动时会创建/更新该 admin 用户，并以环境变量为准。
+    web_username: str = "admin"
+    web_password: str = ""
     # 可选：首次创建用户时要求提供的一次性初始化口令。
     # 为空时保持旧行为（首个注册用户自动成为 admin）。
     setup_token: str = ""
@@ -73,15 +77,40 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # ── JWT_SECRET_KEY: MUST be set via environment variable (never hardcoded in .env) ──
+# Normalize env-provided web credentials (Coolify variables often include
+# accidental surrounding whitespace).
+settings.web_username = (settings.web_username or "admin").strip() or "admin"
+settings.web_password = (settings.web_password or "").strip()
+if settings.web_password and len(settings.web_password) < 6:
+    raise ValueError(
+        "WEB_PASSWORD is too short — minimum 6 characters. "
+        "Set a stronger value in the Coolify/environment variables."
+    )
+
 _env_jwt_secret = os.environ.get("JWT_SECRET_KEY", "").strip()
 if _env_jwt_secret:
     settings.jwt_secret_key = _env_jwt_secret
 
 if not settings.jwt_secret_key:
-    raise ValueError(
-        "JWT_SECRET_KEY is not set in the environment — cannot start without it. "
-        "Set it via:  export JWT_SECRET_KEY=$(python -c \"import secrets; print(secrets.token_urlsafe(64))\")"
-    )
+    if settings.web_password:
+        # Convenience for single-operator Coolify deployments: allow the
+        # dashboard password to be the only required secret.  A dedicated
+        # JWT_SECRET_KEY is still recommended (changing WEB_PASSWORD will
+        # invalidate existing sessions).
+        import hashlib
+
+        settings.jwt_secret_key = hashlib.sha256(
+            f"poly15m4-jwt:{settings.web_password}".encode("utf-8")
+        ).hexdigest()
+        logging.getLogger(__name__).warning(
+            "JWT_SECRET_KEY is not set — deriving it from WEB_PASSWORD. "
+            "Set JWT_SECRET_KEY explicitly for production deployments."
+        )
+    else:
+        raise ValueError(
+            "JWT_SECRET_KEY is not set in the environment — cannot start without it. "
+            "Set JWT_SECRET_KEY or WEB_PASSWORD (the latter derives a JWT secret)."
+        )
 
 _jwt_secret = settings.jwt_secret_key.strip()
 if len(_jwt_secret) < 32:

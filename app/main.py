@@ -23,7 +23,7 @@ from app.api.websocket import router as ws_router
 from app.api.indicators import router as indicators_router
 
 
-from app.auth import get_current_user
+from app.auth import get_current_user, sync_env_admin
 from app.database import init_db
 from app.config import settings
 from app.runtime_config import get_creds
@@ -85,6 +85,9 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting {} ...", settings.app_name)
     await init_db()
+    # Coolify/deployment env may define WEB_USERNAME/WEB_PASSWORD as the
+    # authoritative dashboard credentials.
+    await sync_env_admin()
 
     strategy = SinglePositionStrategy()
     set_strategy_ref(strategy)

@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from loguru import logger
 import bcrypt
 
 from app.config import settings
@@ -56,6 +57,49 @@ def _extract_token(request: Request) -> str | None:
     # Fall back to the HttpOnly cookie when no Bearer token was supplied
     # (including the case of an empty "Authorization: Bearer " header).
     return request.cookies.get(_COOKIE_NAME)
+
+
+async def sync_env_admin() -> None:
+    """
+    Create or update the dashboard admin from WEB_USERNAME / WEB_PASSWORD.
+
+    Coolify deployments configure the login password as an environment
+    variable.  When WEB_PASSWORD is set it is authoritative: the admin row is
+    created on first boot and its bcrypt hash is refreshed whenever the env
+    value changes.  When WEB_PASSWORD is empty the previous behaviour (first
+    login/register creates the admin) is preserved.
+    """
+    password = (settings.web_password or "").strip()
+    if not password:
+        return
+
+    username = (settings.web_username or "admin").strip() or "admin"
+    async with async_session() as db:
+        from sqlalchemy import select
+
+        row = await db.execute(select(User).where(User.username == username))
+        user = row.scalar_one_or_none()
+
+        if user is None:
+            db.add(User(
+                username=username,
+                password_hash=hash_password(password),
+                is_admin=1,
+            ))
+            await db.commit()
+            logger.info("Created admin '{}' from WEB_PASSWORD environment variable", username)
+            return
+
+        changed = False
+        if not verify_password(password, user.password_hash):
+            user.password_hash = hash_password(password)
+            changed = True
+        if not user.is_admin:
+            user.is_admin = 1
+            changed = True
+        if changed:
+            await db.commit()
+            logger.info("Updated admin '{}' from WEB_PASSWORD environment variable", username)
 
 
 async def get_current_user(request: Request) -> User:

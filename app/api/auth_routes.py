@@ -23,13 +23,16 @@ _rate_limit: dict[str, tuple[deque, datetime]] = {}
 
 
 def _check_rate_limit(username: str):
+    """Reject after 5 failed attempts in a 15-minute window.
+
+    Only failures are recorded (by _record_failure); successful logins call
+    _clear_failures so normal usage never hits the limit.
+    """
     now = datetime.now(timezone.utc)
     with _rate_limit_lock:
         entry = _rate_limit.get(username)
         if entry is None:
-            d = deque(maxlen=5)
-            d.append(now)
-            _rate_limit[username] = (d, now)
+            _rate_limit[username] = (deque(maxlen=5), now)
             return
         failures, window_start = entry
         if (now - window_start).total_seconds() > 900:
@@ -38,8 +41,14 @@ def _check_rate_limit(username: str):
             return
         if len(failures) >= 5:
             raise HTTPException(status_code=429, detail="Too many failed attempts, try again in 15 minutes")
-        failures.append(now)
-        _rate_limit[username] = (failures, window_start)
+
+
+def _clear_failures(username: str):
+    with _rate_limit_lock:
+        entry = _rate_limit.get(username)
+        if entry is not None:
+            entry[0].clear()
+            _rate_limit[username] = (entry[0], datetime.now(timezone.utc))
 
 
 def _client_ip(request: Request) -> str:
@@ -182,6 +191,7 @@ async def login(request: Request, response: Response, body: dict):
         _record_failure(username)
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
+    _clear_failures(username)
     token = create_access_token({"sub": str(user.id), "username": username, "is_admin": user.is_admin})
     _set_cookie(response, token, secure=_is_https(request))
     return {"username": user.username, "is_admin": user.is_admin, "token": token}

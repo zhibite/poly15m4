@@ -91,6 +91,8 @@ poly15m4/
 
 - 除 `/api/auth/*` 外，所有 REST API 都需要 JWT（`Authorization: Bearer` 或 `pm_token` Cookie）；WebSocket 同样校验 Cookie / `?token=`
 - `python run.py` 默认只监听 `127.0.0.1`；容器中由 Dockerfile / docker-compose 设置 `HOST=0.0.0.0`
+- Web 登录账号推荐通过环境变量 `WEB_USERNAME` / `WEB_PASSWORD` 设置（Coolify 面板可直接配置）。启动时会创建或更新对应 admin 用户，密码以环境变量为准
+- 未设置 `JWT_SECRET_KEY` 时会从 `WEB_PASSWORD` 派生 JWT 签名密钥；生产环境仍建议单独设置 `JWT_SECRET_KEY`
 - 建议设置 `SETUP_TOKEN`，防止首次创建用户（admin）被他人抢占；设置后注册时必须提供 `setup_token`
 - 不要把包含 `WALLET_PRIVATE_KEY` / `API_SECRET` 的 `.env`、`.env.docker` 提交到版本库
 
