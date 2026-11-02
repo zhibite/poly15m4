@@ -81,8 +81,42 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     # 信号驱动入场
     "core_agree_threshold": (2.0, 6.0),
     "core_agree_standard": (2.0, 6.0),
+    "core_contradict_limit": (0.0, 6.0),
+    "entry_price_alignment_min_dev": (0.0, 0.50),
     "entry_price_min": (0.01, 0.95),
     "entry_price_max": (0.05, 0.70),
+
+    # 流动性与信号阈值
+    "min_depth_coverage": (0.5, 20.0),
+    "max_slippage_pct": (0.1, 20.0),
+    "obi_contradict_skip": (0.0, 1.0),
+    "oi_change_significant": (0.001, 0.50),
+
+    # 按 Core 共识数量配置仓位倍数
+    "stake_mult_core3": (0.0, 5.0),
+    "stake_mult_core4": (0.0, 5.0),
+    "stake_mult_core5": (0.0, 5.0),
+    "stake_mult_core6": (0.0, 5.0),
+
+    # 分数 Kelly
+    "kelly_fraction": (0.0, 1.0),
+    "kelly_prior_weight": (1.0, 200.0),
+    "kelly_min_samples": (0.0, 1000.0),
+    "kelly_max_mult": (0.0, 10.0),
+    "bankroll_usdc": (1.0, 1_000_000.0),
+
+    # 因子模型
+    "factor_mode": (0.0, 2.0),
+    "factor_w_trend": (0.0, 1.0),
+    "factor_w_reversion": (0.0, 1.0),
+    "factor_w_price": (0.0, 1.0),
+    "factor_w_micro": (0.0, 1.0),
+    "factor_w_flow": (0.0, 1.0),
+    "factor_min_net": (0.0, 1.0),
+    "factor_min_agreement": (0.0, 1.0),
+    "factor_rev_veto_score": (0.0, 1.0),
+    "factor_max_spread_bps": (1.0, 1000.0),
+    "factor_oi_change_threshold": (0.001, 0.50),
 
     # 止盈止损（entry_controller._calc_stop_levels）
     "tp_base_pct": (1.0, 99.0),
@@ -91,9 +125,37 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     "entry_price_max_tp": (0.05, 0.60),
     "sl_base_pct": (-99.0, 0.0),
 
+    # 出场策略
+    "exit_tp_sl_disable_after_elapsed_sec": (0.0, 900.0),
+    "exit_cost_buffer_pct": (0.0, 20.0),
+    "exit_trailing_stop_pct": (0.0, 50.0),
+    "exit_trailing_activation_pct": (0.0, 200.0),
+
+    # 主策略风控
+    "main_max_daily_loss_usdc": (-10000.0, 0.0),
+    "main_max_consecutive_losses": (0.0, 50.0),
+    "main_loss_cooldown_sec": (0.0, 86400.0),
+    "max_open_positions_total": (1.0, 20.0),
+
     # 兼容旧 key
     "signal_fixed_stop_loss_pct": (-99.0, 0.0),
     "entry_skip_if_late": (0, 1),
+
+    # ── 末端顺势策略 ────────────────────────────────────────────────
+    "end_window_start_sec": (0.0, 900.0),
+    "end_window_end_sec": (0.0, 900.0),
+    "end_hardcut_sec": (0.0, 900.0),
+    "end_min_entry_price": (0.0, 1.0),
+    "end_confidence_threshold": (0.0, 100.0),
+    # 注意：reversal_stop_pct 是小数（0.05 = 5%），不是百分数
+    "end_reversal_stop_pct": (0.0, 0.5),
+    "end_tp_min_pct": (0.0, 100.0),
+    "end_tp_max_pct": (0.0, 100.0),
+    "end_tp_entry_min": (0.01, 0.99),
+    "end_tp_entry_max": (0.01, 1.0),
+    "end_sl_pct": (-100.0, 0.0),
+    "end_base_position_usdc": (1.0, 100.0),
+    "end_max_daily_loss": (-1000.0, 0.0),
 }
 
 
@@ -102,6 +164,14 @@ _BOOL_KEYS_BODY = frozenset(
         "asset_btc_enabled",
         "asset_eth_enabled",
         "entry_skip_if_late",
+        "entry_require_price_alignment",
+        "use_kelly_sizing",
+        "exit_hold_to_settlement",
+        "exit_tp_enabled",
+        "exit_sl_enabled",
+        "end_enabled",
+        "end_asset_btc_enabled",
+        "end_asset_eth_enabled",
     }
 )
 
@@ -143,13 +213,23 @@ async def api_update_config(body: dict[str, Any], request: Request):
             patch[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
             continue
         try:
-            if k in ("core_agree_threshold", "core_agree_standard"):
+            if k in (
+                "core_agree_threshold", "core_agree_standard",
+                "core_contradict_limit", "main_max_consecutive_losses",
+                "main_loss_cooldown_sec", "max_open_positions_total",
+                "kelly_min_samples", "factor_mode",
+            ):
                 val = int(round(float(v)))
             else:
                 val = float(v)
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail=f"Invalid value for {k}") from None
-        if k in ("core_agree_threshold", "core_agree_standard"):
+        if k in (
+            "core_agree_threshold", "core_agree_standard",
+            "core_contradict_limit", "main_max_consecutive_losses",
+            "main_loss_cooldown_sec", "max_open_positions_total",
+            "kelly_min_samples", "factor_mode",
+        ):
             if not (int(lo) <= int(val) <= int(hi)):
                 raise HTTPException(status_code=400, detail=f"{k} must be between {int(lo)} and {int(hi)}")
             patch[k] = val
@@ -191,6 +271,54 @@ async def api_update_config(body: dict[str, Any], request: Request):
         raise HTTPException(
             status_code=400,
             detail=f"entry_early_start_elapsed_sec ({entry_start:.0f}s) must be <= entry_late_cutoff_elapsed_sec ({entry_cutoff:.0f}s)",
+        )
+
+    exit_disable_after = float(
+        merged.get("exit_tp_sl_disable_after_elapsed_sec", 0.0)
+    )
+    if exit_disable_after > window_dur:
+        raise HTTPException(
+            status_code=400,
+            detail=f"exit_tp_sl_disable_after_elapsed_sec ({exit_disable_after:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
+        )
+
+    # 末端策略时间窗口与止盈区间校验
+    end_start = float(merged.get("end_window_start_sec", 720.0))
+    end_end = float(merged.get("end_window_end_sec", 870.0))
+    end_hardcut = float(merged.get("end_hardcut_sec", 885.0))
+    if end_start >= end_end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_window_start_sec ({end_start:.0f}s) must be < end_window_end_sec ({end_end:.0f}s)",
+        )
+    if end_end > window_dur:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_window_end_sec ({end_end:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
+        )
+    if end_hardcut > window_dur:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_hardcut_sec ({end_hardcut:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
+        )
+    if end_hardcut < end_end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_hardcut_sec ({end_hardcut:.0f}s) must be >= end_window_end_sec ({end_end:.0f}s)",
+        )
+    end_tp_min = float(merged.get("end_tp_min_pct", 10.0))
+    end_tp_max = float(merged.get("end_tp_max_pct", 30.0))
+    if end_tp_min > end_tp_max:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_tp_min_pct ({end_tp_min}) must be <= end_tp_max_pct ({end_tp_max})",
+        )
+    end_tp_entry_min = float(merged.get("end_tp_entry_min", 0.70))
+    end_tp_entry_max = float(merged.get("end_tp_entry_max", 0.90))
+    if end_tp_entry_min >= end_tp_entry_max:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_tp_entry_min ({end_tp_entry_min}) must be < end_tp_entry_max ({end_tp_entry_max})",
         )
 
     # 信号驱动：时间窗口上界必须在窗口总长以内

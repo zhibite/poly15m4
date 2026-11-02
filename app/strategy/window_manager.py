@@ -18,6 +18,7 @@ from typing import Dict, Optional
 from loguru import logger
 
 from app.strategy.market_service import MarketService
+from app.strategy.models import MarketInfo
 from app.strategy.window_context import WindowContext, PriceSnapshot
 
 

@@ -18,7 +18,7 @@ Advanced 过滤结果：
   - neutral    ：无特殊信号，正常执行
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -32,7 +32,8 @@ from app.api.indicators import (
     fetch_binance_funding,
     fetch_binance_oi,
     fetch_binance_obi,
-    fetch_binance_cvd,
+    closed_bar_series,
+    cvd_from_klines,
     _build_liquidation,
     _calc_rsi,
     _calc_macd_series,
@@ -86,18 +87,50 @@ class CoreSignals:
     bbands: IndicatorSignal
 
     @property
-    def total_agree(self) -> int:
-        return sum(1 for s in [self.rsi, self.macd, self.vwap, self.ema, self.pivot, self.bbands] if s.agree)
+    def _signals(self) -> list["IndicatorSignal"]:
+        return [self.rsi, self.macd, self.vwap, self.ema, self.pivot, self.bbands]
 
     @property
     def primary_direction(self) -> SignalDir:
-        """多数方向（排除 SKIP）"""
-        dirs = [s.direction for s in [self.rsi, self.macd, self.vwap, self.ema, self.pivot, self.bbands] if s.direction != SignalDir.SKIP]
+        """
+        多数方向（排除 SKIP / NONE）。
+
+        UP 与 DOWN 票数相同时返回 SKIP，避免平票默认做 UP。
+        """
+        dirs = [
+            s.direction for s in self._signals
+            if s.direction in (SignalDir.UP, SignalDir.DOWN)
+        ]
         if not dirs:
             return SignalDir.SKIP
-        up   = dirs.count(SignalDir.UP)
+        up = dirs.count(SignalDir.UP)
         down = dirs.count(SignalDir.DOWN)
-        return SignalDir.UP if up >= down else SignalDir.DOWN
+        if up == down:
+            return SignalDir.SKIP
+        return SignalDir.UP if up > down else SignalDir.DOWN
+
+    @property
+    def total_agree(self) -> int:
+        """Core 指标中与主方向一致的数量（不再把反向信号算作共识）。"""
+        primary = self.primary_direction
+        if primary == SignalDir.SKIP:
+            return 0
+        return sum(
+            1 for s in self._signals
+            if s.agree and s.direction == primary
+        )
+
+    @property
+    def contradicting_count(self) -> int:
+        """Core 指标中与主方向相反的数量。"""
+        primary = self.primary_direction
+        if primary == SignalDir.SKIP:
+            return 0
+        return sum(
+            1 for s in self._signals
+            if s.agree and s.direction in (SignalDir.UP, SignalDir.DOWN)
+            and s.direction != primary
+        )
 
 
 @dataclass
@@ -142,8 +175,10 @@ class SignalResult:
     advanced: AdvancedFilters
 
     # 综合共识
-    core_agree: int             # Core 指标中同意主方向的数量
-    advanced_confirm: bool       # Advanced 5 是否确认主方向
+    core_agree: int             # Core 指标中与主方向一致的数量（方向对齐）
+    core_contradict: int = 0    # Core 指标中与主方向相反的数量
+    advanced_confirm: bool = False       # Advanced 5 是否确认主方向
+    bar_ts: int = 0             # 信号对应的最后一根已收盘 K 线时间（epoch 秒）
 
     # 最终决策（由 EntryController 解读，service 只返回原始数据）
     suggested_position_pct: float = 1.0   # 旧字段，保留兼容性
@@ -164,6 +199,9 @@ class SignalResult:
     raw_rsi: float = 50.0
     raw_funding: float = 0.0
 
+    # 数值型原始指标，供 factor_model 计算因子分数
+    raw_metrics: dict = field(default_factory=dict)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 全局常量
@@ -182,7 +220,9 @@ FUNDING_EXTREME_REDUCE_THRESHOLD: float = 0.0008   # > +0.08%
 # OI 变化阈值（使用窗口期变化率，而非 tick-to-tick）
 # 计算方式：(当前OI - 窗口起始OI) / 窗口起始OI
 # Binance openInterest 是累计值，tick-to-tick 变化极小
-OI_CHANGE_SIGNIFICANT: float = 0.10   # 10% 窗口期变化视为显著
+# 30 分钟 OI 变化阈值。默认 2%：15m 周期内 10% 的 OI 变化过于罕见，
+# 会导致 OI 信号几乎永远不触发。
+OI_CHANGE_SIGNIFICANT: float = 0.02
 
 # OI 历史中第一个值作为窗口起始基准（固定起点）
 OI_WINDOW_START_OFFSET: int = 0  # 始终使用历史中的第一个值作为基准
@@ -197,68 +237,18 @@ def _sec_remaining(sec: float) -> str:
     return f"{sec/60:.1f}min" if sec >= 60 else f"{sec:.0f}s"
 
 
-def _count_core_agree(
-    rsi_val: float,
-    rsi_crossed_up: bool,
-    rsi_crossed_down: bool,
-    macd_hist_positive: bool,
-    vwap_sig: str,
-    ema_cross: str,
-    pivot_sig: str,
-    bbands_sig: str,
-) -> int:
+def _count_core_agree(directions: list["SignalDir"]) -> int:
     """
-    计算 Core 6 指标中同意主方向的数量。
-    与 _calc_core_signals 中的 agree 判断逻辑保持一致。
+    计算 Core 6 中与主方向一致的数量。
 
-    agree 条件：
-      RSI: 极端反转时（crossed_up → UP，crossed_down → DOWN）
-      MACD: 直方图正向放大 → UP，负向放大 → DOWN
-      VWAP: 价格在 VWAP 上方且 RSI>50+MACD 同向 → UP，
-             价格在 VWAP 下方且 RSI<50+MACD 同向 → DOWN
-      EMA: 金叉 → UP，死叉 → DOWN
-      Pivot: 突破高点 → UP，跌破低点 → DOWN
-      BBands: 触及上轨 → UP，触及下轨 → DOWN
+    directions 只包含 agree=True 的指标方向。UP/DOWN 平票时返回 0，
+    避免平票被当成有方向。
     """
-    count = 0
-
-    # RSI
-    if rsi_crossed_up:
-        count += 1
-    elif rsi_crossed_down:
-        count += 1
-
-    # MACD
-    if macd_hist_positive:
-        count += 1
-
-    # VWAP（需要 RSI 偏多/偏空 + MACD 同向才 agree）
-    if vwap_sig == "above":
-        if rsi_val > 50 and macd_hist_positive:
-            count += 1
-    elif vwap_sig == "below":
-        if rsi_val < 50 and not macd_hist_positive:
-            count += 1
-
-    # EMA
-    if ema_cross == "golden":
-        count += 1
-    elif ema_cross == "death":
-        count += 1
-
-    # Pivot
-    if pivot_sig == "above":
-        count += 1
-    elif pivot_sig == "below":
-        count += 1
-
-    # BBands
-    if bbands_sig == "upper_touch":
-        count += 1
-    elif bbands_sig == "lower_touch":
-        count += 1
-
-    return count
+    up = directions.count(SignalDir.UP)
+    down = directions.count(SignalDir.DOWN)
+    if up == down:
+        return 0
+    return max(up, down)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -274,6 +264,50 @@ _MAX_OI_HISTORY: int = 30
 _CVD_BASELINE: dict[str, list[float]] = {}
 _MAX_CVD_BASELINE: int = 10
 _CVD_BASELINE_LOCK = asyncio.Lock()
+
+# 展示用的带符号 CVD 历史（每分钟一条）
+_CVD_HISTORY: dict[str, list[float]] = {}
+_MAX_CVD_HISTORY: int = 30
+
+# 最近一次写入历史的时间戳（epoch 秒，最后一根已收盘 1m K 线）。
+# 同一根 bar 内无论 get_signal / get_indicators 调用多少次，历史只写一次。
+_LAST_BAR_TS: dict[str, int] = {}
+
+
+def _advance_bar_history(
+    asset: str,
+    bar_ts: int,
+    rsi_val: float,
+    oi_val: float,
+    cvd_val: float,
+) -> None:
+    """每根已收盘 1m K 线只推进一次 RSI / OI / CVD 历史。"""
+    if bar_ts <= 0:
+        return
+    if _LAST_BAR_TS.get(asset) == bar_ts:
+        return
+    _LAST_BAR_TS[asset] = bar_ts
+
+    rsi_h = _RSI_HISTORY.setdefault(asset, [])
+    rsi_h.append(float(rsi_val))
+    if len(rsi_h) > _MAX_RSI_HISTORY:
+        del rsi_h[: len(rsi_h) - _MAX_RSI_HISTORY]
+
+    if oi_val and oi_val > 0:
+        oi_h = _OI_HISTORY.setdefault(asset, [])
+        oi_h.append(float(oi_val))
+        if len(oi_h) > _MAX_OI_HISTORY:
+            del oi_h[: len(oi_h) - _MAX_OI_HISTORY]
+
+    cvd_h = _CVD_BASELINE.setdefault(asset, [])
+    cvd_h.append(abs(float(cvd_val)))
+    if len(cvd_h) > _MAX_CVD_BASELINE:
+        del cvd_h[: len(cvd_h) - _MAX_CVD_BASELINE]
+
+    cvd_hist = _CVD_HISTORY.setdefault(asset, [])
+    cvd_hist.append(float(cvd_val))
+    if len(cvd_hist) > _MAX_CVD_HISTORY:
+        del cvd_hist[: len(cvd_hist) - _MAX_CVD_HISTORY]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -313,6 +347,15 @@ class IndicatorSignalService:
     def __init__(self, asset: str = "BTC"):
         self.asset = asset.upper()
         self.symbol_spot = f"{self.asset}USDT"
+        # get_signal 按「已收盘 1m bar + 当前窗口」缓存，避免每 tick 重复拉取/计算。
+        self._cached_signal: Optional[SignalResult] = None
+        self._cached_signal_key: tuple[int, int] | None = None
+        # OI 变化显著阈值（可由 runtime_config 覆盖）
+        self.oi_change_significant: float = OI_CHANGE_SIGNIFICANT
+
+    def set_thresholds(self, *, oi_change_significant: float | None = None) -> None:
+        if oi_change_significant is not None and oi_change_significant > 0:
+            self.oi_change_significant = float(oi_change_significant)
 
     def _rsi_hist(self) -> list[float]:
         return _RSI_HISTORY.setdefault(self.asset, [])
@@ -416,15 +459,15 @@ class IndicatorSignalService:
         atr_dollar = atr_val  # BTC 以美元计价
 
         # ── RSI（带极端反转 + 背离检测）─────────────────────────────
-        prev_rsi = self._rsi_hist()[-1] if self._rsi_hist() else 50.0
+        # 只比较「上一根已收盘 bar」与「当前已收盘 bar」，不再使用 tick 级
+        # 的 _RSI_HISTORY（该历史现在只用于展示/统计）。
+        prev_rsi = _calc_rsi(closes[:-1]) if len(closes) >= 2 else 50.0
         rsi_val, crossed_down, crossed_up = self._calc_rsi_with_extremes(closes, prev_rsi)
-        self._rsi_hist().append(rsi_val)
-        if len(self._rsi_hist()) > _MAX_RSI_HISTORY:
-            self._rsi_hist().pop(0)
 
         rsi_dir = SignalDir.SKIP
         rsi_agree = False
         rsi_reason = ""
+        div_val = 0.0  # +1 看涨背离 / -1 看跌背离
 
         if crossed_down:
             rsi_dir = SignalDir.DOWN
@@ -441,6 +484,7 @@ class IndicatorSignalService:
                 rsi_dir = div_dir
                 rsi_agree = True
                 rsi_reason = div_reason
+                div_val = 1.0 if div_dir == SignalDir.UP else (-1.0 if div_dir == SignalDir.DOWN else 0.0)
             elif rsi_val >= 70.0:
                 rsi_dir = SignalDir.SKIP
                 rsi_reason = f"RSI={rsi_val:.1f} 处于超买区，等回落"
@@ -624,7 +668,7 @@ class IndicatorSignalService:
         else:
             piv_reason = "Pivot 数据不足"
 
-        return CoreSignals(
+        core = CoreSignals(
             rsi=IndicatorSignal(name="RSI", direction=rsi_dir, agree=rsi_agree,
                                reason=rsi_reason, raw_value=f"{rsi_val:.1f}"),
             macd=IndicatorSignal(name="MACD", direction=macd_dir, agree=macd_agree,
@@ -641,6 +685,25 @@ class IndicatorSignalService:
                                   reason=bb_reason,
                                   raw_value=f"M={bb_mid:.2f} U={bb_upper:.2f} L={bb_lower:.2f}"),
         )
+        raw_metrics = {
+            "rsi": float(rsi_val),
+            "prev_rsi": float(prev_rsi),
+            "rsi_divergence": float(div_val),
+            "macd_hist": float(macd_hist[-1]) if macd_hist else 0.0,
+            "ema9": float(ema9_val),
+            "ema21": float(ema21_val),
+            "atr": float(atr_val),
+            "close": float(current_price),
+            "vwap": float(vwap_val),
+            "pivot_mid": float(pivot.get("mid", current_price)),
+            "pivot_high": float(pivot.get("high", current_price)),
+            "pivot_low": float(pivot.get("low", current_price)),
+            "bb_mid": float(bb_mid),
+            "bb_upper": float(bb_upper),
+            "bb_lower": float(bb_lower),
+            "bb_width": float(bb_upper - bb_lower),
+        }
+        return core, raw_metrics
 
     # ── Advanced 5 过滤计算 ───────────────────────────────────────────────
     # P3-13 Fix: 改为实例方法，从自身 OI 历史直接计算 oi_change，
@@ -739,7 +802,7 @@ class IndicatorSignalService:
             # 回退：如果首值无效，用相邻 tick 差值（仍能捕捉大幅波动）
             oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
 
-        if len(closes) >= 2 and abs(oi_change) >= OI_CHANGE_SIGNIFICANT:
+        if len(closes) >= 2 and abs(oi_change) >= self.oi_change_significant:
             price_up = closes[-1] > closes[-2]
             oi_up    = oi_change > 0
             if price_up and oi_up:
@@ -867,7 +930,9 @@ class IndicatorSignalService:
 
         tasks = [_with_timeout(c, timeout_sec) for c in coros]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return tuple(r if not isinstance(r, Exception) else None for r in results)
+        # 用 BaseException 而不是 Exception：asyncio 取消等场景可能返回
+        # CancelledError（BaseException 子类），后续代码会调用 .get()。
+        return tuple(r if not isinstance(r, BaseException) else None for r in results)
 
     # ── 主入口 ────────────────────────────────────────────────
     async def get_signal(
@@ -882,45 +947,61 @@ class IndicatorSignalService:
         elapsed_sec = (now - window_start).total_seconds()
         remaining_sec = max(0.0, window_duration_sec - elapsed_sec)
 
-        # ── 并发获取所有数据 ─────────────────────────────────────────
+        # ── 按 bar 缓存 ─────────────────────────────────────────────
+        # 信号只依赖已收盘的 1m bar；同一 bar 内 EntryController 每 tick 都会
+        # 调用 get_signal，这里直接返回缓存并只更新时间/价格字段，避免重复
+        # 请求 Binance，也避免信号方向在 tick 之间抖动。
+        bar_ts = int(now.timestamp()) // 60 * 60 - 60
+        cache_key = (bar_ts, int(window_start.timestamp()))
+        if self._cached_signal is not None and self._cached_signal_key == cache_key:
+            return replace(
+                self._cached_signal,
+                timestamp=now,
+                elapsed_sec=elapsed_sec,
+                window_end_sec=remaining_sec,
+                up_mid=up_mid,
+                down_mid=down_mid,
+            )
+
+        # ── 并发获取数据（CVD 由 K 线推导，不再单独请求 aggTrades）──────
         klines_fetch = fetch_binance_klines(self.symbol_spot)
         funding_fetch = fetch_binance_funding(self.symbol_spot)
         oi_fetch = fetch_binance_oi(self.symbol_spot)
         obi_fetch = fetch_binance_obi(self.symbol_spot)
-        cvd_fetch = fetch_binance_cvd(self.symbol_spot)
 
-        klines, funding_val, oi_val, obi_data, cvd_val = await self._gather(
-            klines_fetch, funding_fetch, oi_fetch, obi_fetch, cvd_fetch,
+        klines, funding_val, oi_val, obi_data = await self._gather(
+            klines_fetch, funding_fetch, oi_fetch, obi_fetch,
             timeout_sec=8.0,
         )
 
-        closes   = klines.get("closes", [])   if klines else []
-        highs    = klines.get("highs", [])     if klines else []
-        lows     = klines.get("lows", [])      if klines else []
-        volumes  = klines.get("volumes", [])     if klines else []
-        current_price = closes[-1] if closes else window_open_price
+        raw_closes = klines.get("closes", []) if klines else []
+        closed = closed_bar_series(klines)
+        closes  = closed.get("closes", [])  or raw_closes
+        highs   = closed.get("highs", [])   or (klines.get("highs", []) if klines else [])
+        lows    = closed.get("lows", [])    or (klines.get("lows", []) if klines else [])
+        volumes = closed.get("volumes", []) or (klines.get("volumes", []) if klines else [])
+        # 统一使用 wall-clock 的「上一分钟」作为 bar_ts，确保 get_signal 与
+        # get_indicators 在边界时刻不会对同一根 bar 重复写历史。
+        current_price = raw_closes[-1] if raw_closes else window_open_price
+        cvd_val = cvd_from_klines(klines)
+
+        # 每根已收盘 bar 只推进一次 RSI/OI/CVD 历史
+        rsi_val_for_history = _calc_rsi(closes) if closes else 50.0
+        _advance_bar_history(
+            self.asset, bar_ts, rsi_val_for_history, oi_val or 0.0, cvd_val,
+        )
 
         # ── ATR ───────────────────────────────────────────────
         atr_val = _calc_atr(highs, lows, closes) if highs else 0.0
 
-        # CVD Z-score: read-only from the rolling baseline WITHOUT re-appending.
-        # The service maintains its own _CVD_BASELINE internally; calling _cvd_z_score()
-        # here would append a second copy and corrupt the baseline.
+        # CVD Z-score 从每分钟 CVD 的滚动 baseline 读取（已由 _advance_bar_history 更新）
         cvd_z = self._cvd_z_score_ro(abs(cvd_val))
 
         # ── Liquidation ────────────────────────────────────
         liq = _build_liquidation(self.asset, current_price)
 
-        # Bug-3 fix: append OI to history BEFORE calling _calc_advanced_filters.
-        # _oi_hist must be populated so that oi_change is computed correctly
-        # from the first call onward (not always 0).
-        if oi_val and oi_val > 0:
-            oi_h = self._oi_hist()
-            oi_h.append(float(oi_val))
-            if len(oi_h) > _MAX_OI_HISTORY:
-                oi_h.pop(0)
-        # OI change is read by _calc_advanced_filters from _oi_hist()
-        core = self._calc_core_signals(
+        # OI / CVD 历史已按分钟推进；直接计算 Core 6
+        core, raw_metrics = self._calc_core_signals(
             closes=closes,
             highs=highs,
             lows=lows,
@@ -946,6 +1027,27 @@ class IndicatorSignalService:
             closes=closes,
         )
 
+        # 因子模型所需的数值指标
+        oi_h = self._oi_hist()
+        oi_change = 0.0
+        if len(oi_h) >= 2 and oi_h[0] > 0:
+            oi_change = (oi_h[-1] - oi_h[0]) / oi_h[0]
+        elif len(oi_h) >= 2 and oi_h[-2] > 0:
+            oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
+        raw_metrics.update({
+            "funding": float(funding_val or 0.0),
+            "cvd": float(cvd_val or 0.0),
+            "cvd_z": float(cvd_z),
+            "oi_change": float(oi_change),
+            "price_change": (
+                float(closes[-1] - closes[-2]) if len(closes) >= 2 else 0.0
+            ),
+            "liq_signal": liq.get("signal", "neutral"),
+            "obi_ratio": float(obi_data.get("value", 1.0) if obi_data else 1.0),
+            "up_mid": float(up_mid),
+            "down_mid": float(down_mid),
+        })
+
         # ── 价格区间过滤 ─────────────────────────────────
         anchor_deviation = 0.0
         if window_open_price > 0:
@@ -953,6 +1055,7 @@ class IndicatorSignalService:
 
         # ── 信号强度与仓位建议 ───────────────────────────────
         core_agree = core.total_agree
+        core_contradict = core.contradicting_count
         advanced_confirm = advanced.filter_result == FilterResult.CONFIRM
 
         strength = core_agree
@@ -1006,7 +1109,7 @@ class IndicatorSignalService:
         except (ValueError, TypeError):
             raw_rsi_val = 50.0
 
-        return SignalResult(
+        result = SignalResult(
             asset=self.asset,
             timestamp=now,
             elapsed_sec=elapsed_sec,
@@ -1019,7 +1122,9 @@ class IndicatorSignalService:
             core=core,
             advanced=advanced,
             core_agree=core_agree,
+            core_contradict=core_contradict,
             advanced_confirm=advanced_confirm,
+            bar_ts=bar_ts,
             suggested_position_pct=1.0,
             suggested_action=suggested_action,
             skip_reason=skip_reason,
@@ -1031,7 +1136,11 @@ class IndicatorSignalService:
             anchor_deviation_pct=anchor_deviation,
             raw_rsi=raw_rsi_val,
             raw_funding=funding_val or 0.0,
+            raw_metrics=raw_metrics,
         )
+        self._cached_signal = result
+        self._cached_signal_key = cache_key
+        return result
 
     # ── 指标实时推送专用（用于 WS /ws/indicators）───────────────────────────
     async def get_indicators(
@@ -1058,39 +1167,52 @@ class IndicatorSignalService:
         所有原始数据由调用方预取后传入，避免重复请求 Binance API。
         """
         liq_data = liq_data or {}
-        current_price = closes[-1] if closes else 0.0
-        rsi_val = _calc_rsi(closes) if closes else 50.0
+        raw_closes = closes
+        # 与 get_signal 一致：只使用已收盘的 1m bar 计算指标
+        closed_closes  = closes[:-1]  if len(closes) > 1 else closes
+        closed_highs   = highs[:-1]   if len(highs) > 1 else highs
+        closed_lows    = lows[:-1]    if len(lows) > 1 else lows
+        closed_volumes = volumes[:-1] if len(volumes) > 1 else volumes
+
+        current_price = raw_closes[-1] if raw_closes else 0.0
+        signal_price = closed_closes[-1] if closed_closes else current_price
+        rsi_val = _calc_rsi(closed_closes) if closed_closes else 50.0
 
         # MACD
         macd_line, macd_signal, macd_hist = (0.0, 0.0, [])
-        if closes and len(closes) >= 26:
-            macd_line, macd_signal, macd_hist = _calc_macd_series(closes)
+        if closed_closes and len(closed_closes) >= 26:
+            macd_line, macd_signal, macd_hist = _calc_macd_series(closed_closes)
+            # 26 根时 _calc_macd_series 可能返回 (None, None, [])，避免 round(None)
+            if macd_line is None:
+                macd_line = 0.0
+            if macd_signal is None:
+                macd_signal = 0.0
 
         # EMA — use the cached series for both values and crossover detection
         # (consistent with _calc_core_signals which also uses _calc_ema_series).
-        ema9_full  = self._calc_ema_series(closes, 9)
-        ema21_full = self._calc_ema_series(closes, 21)
-        ema9_val  = ema9_full[-1]  if closes else 0.0
-        ema21_val = ema21_full[-1] if closes else 0.0
+        ema9_full  = self._calc_ema_series(closed_closes, 9)
+        ema21_full = self._calc_ema_series(closed_closes, 21)
+        ema9_val  = ema9_full[-1]  if closed_closes else 0.0
+        ema21_val = ema21_full[-1] if closed_closes else 0.0
 
         # VWAP
-        vwap_val = _calc_vwap(closes, volumes) if closes and volumes else current_price
+        vwap_val = (
+            _calc_vwap(closed_closes, closed_volumes)
+            if closed_closes and closed_volumes else signal_price
+        )
 
         # ATR / Pivot
-        atr_val = _calc_atr(highs, lows, closes) if highs else 0.0
-        pivot = _calc_pivot(closes) if closes else {"high": 0.0, "low": 0.0, "mid": 0.0}
+        atr_val = _calc_atr(closed_highs, closed_lows, closed_closes) if closed_highs else 0.0
+        pivot = _calc_pivot(closed_closes) if closed_closes else {"high": 0.0, "low": 0.0, "mid": 0.0}
 
-        # RSI 反转检测
-        prev_rsi = self._rsi_hist()[-1] if self._rsi_hist() else 50.0
+        # RSI 反转检测：比较上一根已收盘 bar
+        prev_rsi = _calc_rsi(closed_closes[:-1]) if len(closed_closes) >= 2 else 50.0
         rsi_crossed_down = (prev_rsi >= 70.0) and (rsi_val < 70.0)
         rsi_crossed_up   = (prev_rsi <= 30.0) and (rsi_val > 30.0)
-        self._rsi_hist().append(rsi_val)
-        if len(self._rsi_hist()) > _MAX_RSI_HISTORY:
-            self._rsi_hist().pop(0)
 
         # EMA 交叉 — use cached series, consistent with _calc_core_signals
         ema_cross = "parallel"
-        if closes and len(closes) >= 22:
+        if closed_closes and len(closed_closes) >= 22:
             e9p_prev  = ema9_full[-2]
             e21p_prev = ema21_full[-2]
             if e9p_prev <= e21p_prev and ema9_val > ema21_val:
@@ -1100,25 +1222,30 @@ class IndicatorSignalService:
 
         # VWAP 信号
         vwap_sig = "at"
-        if closes:
-            if closes[-1] > vwap_val * 1.001:
+        if closed_closes:
+            if signal_price > vwap_val * 1.001:
                 vwap_sig = "above"
-            elif closes[-1] < vwap_val * 0.999:
+            elif signal_price < vwap_val * 0.999:
                 vwap_sig = "below"
 
         # Pivot 信号
         pivot_sig = "within"
-        if closes and current_price:
-            if current_price > pivot["high"] * 0.9995:
+        if closed_closes and signal_price:
+            if signal_price > pivot["high"] * 0.9995:
                 pivot_sig = "above"
-            elif current_price < pivot["low"] * 1.0005:
+            elif signal_price < pivot["low"] * 1.0005:
                 pivot_sig = "below"
 
-        # CVD Z-score 已在 _cvd_z_score() 调用时（_calc_core_signals 路径）追加到基准，
-        # 此处不再重复追加，避免同一 tick 内追加两次导致基准消耗加速。
-
         # 布林带
-        bb_mid, bb_upper, bb_lower = _calc_bbands(closes) if closes else (0.0, 0.0, 0.0)
+        bb_mid, bb_upper, bb_lower = (
+            _calc_bbands(closed_closes) if closed_closes else (0.0, 0.0, 0.0)
+        )
+        bb_sig = "within"
+        if bb_upper > 0 and closed_closes:
+            if signal_price >= bb_upper * (1 - BBANDS_TOUCH_PCT):
+                bb_sig = "upper_touch"
+            elif signal_price <= bb_lower * (1 + BBANDS_TOUCH_PCT):
+                bb_sig = "lower_touch"
 
         # Window timing (requires window_start to be provided)
         elapsed_sec = 0.0
@@ -1128,25 +1255,69 @@ class IndicatorSignalService:
             elapsed_sec = (now - window_start).total_seconds()
             window_end_sec = max(0.0, float(window_duration_sec) - elapsed_sec)
 
-        rsi_hist = self._rsi_hist()
+        # 每根已收盘 bar 推进一次 RSI/OI/CVD 历史（与 get_signal 共享同一 bar_ts）
+        bar_ts = int(datetime.now(timezone.utc).timestamp()) // 60 * 60 - 60
+        _advance_bar_history(self.asset, bar_ts, rsi_val, oi_val or 0.0, cvd_val)
 
-        # CVD history and Z-score for WS dashboard.
-        # The baseline is populated by get_signal() calls; read it without modifying.
-        cvd_hist = self._cvd_baseline()
+        rsi_hist = self._rsi_hist()
+        cvd_hist = _CVD_HISTORY.get(self.asset, [])
         cvd_z_ro = self._cvd_z_score_ro(abs(cvd_val)) if cvd_val != 0.0 else 0.0
 
-        # OI history — append current value before reading for change calculation
-        # Bug修复: 使用窗口起始 OI（历史中的第一个值）作为基准，计算窗口期变化率
+        # OI history：由 _advance_bar_history 按分钟追加，直接读取
         oi_h = self._oi_hist()
-        if oi_val and oi_val > 0:
-            oi_h.append(float(oi_val))
-            if len(oi_h) > _MAX_OI_HISTORY:
-                oi_h.pop(0)
         oi_change = 0.0
         if len(oi_h) >= 2 and oi_h[0] > 0:
             oi_change = (oi_h[-1] - oi_h[0]) / oi_h[0]
         elif len(oi_h) >= 2 and oi_h[-2] > 0:
             oi_change = (oi_h[-1] - oi_h[-2]) / oi_h[-2]
+
+        # ── Core 6 方向对齐计数（与 _calc_core_signals 的 agree 逻辑一致）──
+        atr_flat = atr_val < ATR_DOLLAR_FLAT_RATIO * max(signal_price, 1e-9)
+        macd_dir = SignalDir.SKIP
+        if not atr_flat and macd_hist:
+            last_h = macd_hist[-1]
+            prev_h = macd_hist[-2] if len(macd_hist) >= 2 else 0.0
+            if last_h > 0 and last_h > prev_h:
+                macd_dir = SignalDir.UP
+            elif last_h < 0 and last_h < prev_h:
+                macd_dir = SignalDir.DOWN
+
+        core_dirs: list[SignalDir] = []
+        if rsi_crossed_down:
+            core_dirs.append(SignalDir.DOWN)
+        elif rsi_crossed_up:
+            core_dirs.append(SignalDir.UP)
+        else:
+            has_div, div_dir, _ = self._check_rsi_divergence(
+                closed_closes, closed_highs, closed_lows,
+            )
+            if has_div and div_dir in (SignalDir.UP, SignalDir.DOWN):
+                core_dirs.append(div_dir)
+
+        if macd_dir in (SignalDir.UP, SignalDir.DOWN):
+            core_dirs.append(macd_dir)
+
+        if vwap_sig == "above" and rsi_val > 50 and macd_dir == SignalDir.UP:
+            core_dirs.append(SignalDir.UP)
+        elif vwap_sig == "below" and rsi_val < 50 and macd_dir == SignalDir.DOWN:
+            core_dirs.append(SignalDir.DOWN)
+
+        if ema_cross == "golden":
+            core_dirs.append(SignalDir.UP)
+        elif ema_cross == "death":
+            core_dirs.append(SignalDir.DOWN)
+
+        if pivot_sig == "above":
+            core_dirs.append(SignalDir.UP)
+        elif pivot_sig == "below":
+            core_dirs.append(SignalDir.DOWN)
+
+        if bb_sig == "upper_touch":
+            core_dirs.append(SignalDir.UP)
+        elif bb_sig == "lower_touch":
+            core_dirs.append(SignalDir.DOWN)
+
+        core_agree = _count_core_agree(core_dirs)
 
         return {
             "asset": self.asset,
@@ -1176,16 +1347,16 @@ class IndicatorSignalService:
                     else "价格 ≈ VWAP"
                 ),
                 "signal": vwap_sig,
-                "price": [round(c, 4) for c in closes[-30:]] if closes else [],
-                "vwap":  [round(vwap_val, 4)] * min(30, len(closes)) if closes else [],
+                "price": [round(c, 4) for c in closed_closes[-30:]] if closed_closes else [],
+                "vwap":  [round(vwap_val, 4)] * min(30, len(closed_closes)) if closed_closes else [],
             },
             "ema": {
                 "ema9":  round(ema9_val, 4),
                 "ema21": round(ema21_val, 4),
                 "cross": ema_cross,
-                "ema9_history":  [round(v, 4) for v in ema9_full[-30:]] if closes else [],
-                "ema21_history": [round(v, 4) for v in ema21_full[-30:]] if closes else [],
-                "price": [round(c, 4) for c in closes[-30:]] if closes else [],
+                "ema9_history":  [round(v, 4) for v in ema9_full[-30:]] if closed_closes else [],
+                "ema21_history": [round(v, 4) for v in ema21_full[-30:]] if closed_closes else [],
+                "price": [round(c, 4) for c in closed_closes[-30:]] if closed_closes else [],
             },
             "pivot": {
                 "high":     round(pivot["high"], 4),
@@ -1200,11 +1371,7 @@ class IndicatorSignalService:
                 "mid":    round(bb_mid, 4),
                 "upper":  round(bb_upper, 4),
                 "lower":  round(bb_lower, 4),
-                "signal": (
-                    "upper_touch" if current_price >= bb_upper * (1 - BBANDS_TOUCH_PCT)
-                    else "lower_touch" if current_price <= bb_lower * (1 + BBANDS_TOUCH_PCT)
-                    else "within"
-                ),
+                "signal": bb_sig,
             },
             "funding": {
                 "value":     round(funding_val, 6),
@@ -1256,21 +1423,7 @@ class IndicatorSignalService:
                 "history":       [round(v, 0) for v in oi_h[-30:]],
             },
             "atr": round(atr_val, 4),
-            # Core 6 共识数量（末端策略 D1 维度需要）
-            # 各指标确认主方向的计数：UP 方向确认 +1，DOWN 方向确认 +1
-            "core_agree": _count_core_agree(
-                rsi_val=rsi_val,
-                rsi_crossed_up=rsi_crossed_up,
-                rsi_crossed_down=rsi_crossed_down,
-                macd_hist_positive=(macd_hist[-1] > 0) if macd_hist else False,
-                vwap_sig=vwap_sig,
-                ema_cross=ema_cross,
-                pivot_sig=pivot_sig,
-                bbands_sig=(
-                    "upper_touch" if current_price >= bb_upper * (1 - 0.0005)
-                    else "lower_touch" if current_price <= bb_lower * (1 + 0.0005)
-                    else "within"
-                ) if bb_upper > 0 else "within",
-            ),
+            # Core 6 方向对齐后的共识数量（末端策略 D1 维度需要）
+            "core_agree": core_agree,
         }
 

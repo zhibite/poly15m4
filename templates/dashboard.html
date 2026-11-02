@@ -335,8 +335,8 @@
   <div class="section">
     <h2>当前持仓</h2>
     <table>
-      <thead><tr><th>品种</th><th>方向</th><th>代币数量</th><th>均价</th><th>当前价</th><th>总投资</th><th>已补次数</th><th>窗口结束</th><th>浮动盈亏</th></tr></thead>
-      <tbody id="positions_tbody"><tr><td colspan="7" class="no-data">无持仓</td></tr></tbody>
+      <thead><tr><th>品种</th><th>策略</th><th>方向</th><th>代币数量</th><th>均价</th><th>当前价</th><th>总投资</th><th>已补次数</th><th>窗口结束</th><th>浮动盈亏</th></tr></thead>
+      <tbody id="positions_tbody"><tr><td colspan="10" class="no-data">无持仓</td></tr></tbody>
     </table>
   </div>
 
@@ -601,7 +601,11 @@ function applyState(d) {
   applyPrices('btc', mkts.BTC);
   applyPrices('eth', mkts.ETH);
 
-  updatePositions(d.open_positions || {});
+  updatePositions(
+    d.open_positions || {},
+    d.end_positions || {},
+    d.settling_positions || [],
+  );
 
   // Mode badge
   const live = d.live_mode;
@@ -612,39 +616,54 @@ function applyState(d) {
 }
 
 // ── Positions ────────────────────────────────────────────────────────────
-function updatePositions(positions) {
+function updatePositions(mainPositions, endPositions, settlingPositions) {
   const tbody = document.getElementById('positions_tbody');
   if (!tbody) return;
-  if (!positions || Object.keys(positions).length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="no-data">无持仓</td></tr>';
+
+  const rows = [];
+  Object.entries(mainPositions || {}).forEach(([asset, p]) => {
+    rows.push({ asset, p, kind: '主策略', fills: p.addons_done != null ? String(p.addons_done) : '--', settling: false });
+  });
+  Object.entries(endPositions || {}).forEach(([asset, p]) => {
+    rows.push({ asset, p, kind: '末端', fills: '--', settling: false });
+  });
+  (settlingPositions || []).forEach((p) => {
+    rows.push({ asset: p.asset || '--', p, kind: '结算中', fills: '--', settling: true });
+  });
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="no-data">无持仓</td></tr>';
     return;
   }
-  tbody.innerHTML = Object.entries(positions).map(([asset, p]) => {
+
+  tbody.innerHTML = rows.map(({ asset, p, kind, fills, settling }) => {
     const we = p.window_end ? fmtBJStr(p.window_end) : '--';
-    const pnlPct = p.unrealized_pnl_pct ?? 0;
-    const pnlUsd = p.unrealized_pnl ?? 0;
     const sideLabel = p.side === 'UP' ? 'UP' : 'DOWN';
     const mkt = (_globalMarkets[asset] || {});
-    const curPrice = (p.mid != null && p.mid !== undefined)
-      ? p.mid
-      : (p.side === 'DOWN' ? mkt.down_mid : mkt.up_mid);
+    const curPrice = settling
+      ? null
+      : ((p.mid != null) ? p.mid : (p.side === 'DOWN' ? mkt.down_mid : mkt.up_mid));
     const curPriceStr = curPrice != null ? Number(curPrice).toFixed(4) : '--';
-    const nextPx = p.next_add_trigger_price != null ? p.next_add_trigger_price : p.next_add_trigger;
-    const nextPct = p.next_add_drawdown_pct;
     const entryShow = Number(p.vwap ?? p.entry ?? p.entry_price ?? 0).toFixed(4);
     const tokensStr = (p.tokens != null) ? Number(p.tokens).toFixed(2) : '--';
-    const fillsStr = (p.addons_done != null) ? String(p.addons_done) : '--';
     const costStr = (p.actual_cost_usdc != null) ? Number(p.actual_cost_usdc).toFixed(2) : '--';
+    const hasPnl = !settling && p.unrealized_pnl_pct != null;
+    const pnlPct = hasPnl ? Number(p.unrealized_pnl_pct) : 0;
+    const pnlUsd = hasPnl ? Number(p.unrealized_pnl ?? 0) : 0;
+    const pnlCell = hasPnl
+      ? `<td class="${pnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%&nbsp;<span style="font-size:11px;opacity:0.7">(${(pnlUsd >= 0 ? '+' : '') + Number(pnlUsd).toFixed(2)})</span></td>`
+      : '<td>--</td>';
     return `<tr>
       <td>${asset}</td>
+      <td>${kind}</td>
       <td><span class="badge ${p.side}">${sideLabel}</span></td>
       <td>${tokensStr}</td>
       <td>${entryShow}</td>
       <td>${curPriceStr}</td>
       <td>${costStr}</td>
-      <td>${fillsStr}</td>
+      <td>${fills}</td>
       <td>${we}</td>
-      <td class="${pnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%&nbsp;<span style="font-size:11px;opacity:0.7">(${(pnlUsd >= 0 ? '+' : '') + Number(pnlUsd).toFixed(2)})</span></td>
+      ${pnlCell}
     </tr>`;
   }).join('');
 }

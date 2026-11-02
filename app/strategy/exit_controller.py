@@ -40,21 +40,45 @@ class ExitController:
         pos_mgr: PositionManager,
         wm=None,
         decision_logger=None,
+        risk_manager=None,
     ):
         self._pos_mgr = pos_mgr
         self._decision_logger = decision_logger
+        self._risk_manager = risk_manager
         self._exit_retry_locks: dict[str, asyncio.Lock] = {}
 
+        # 出场策略参数（可通过 /api/config 做 A/B）
+        self._hold_to_settlement = False
+        self._tp_enabled = True
+        self._sl_enabled = True
+        self._tp_sl_disable_after_elapsed_sec = 0.0
+        self._cost_buffer_pct = 0.0
+        self._trailing_stop_pct = 0.0
+        self._trailing_activation_pct = 20.0
+
     def sync_params(self, cfg: dict) -> None:
-        pass
+        self._hold_to_settlement = bool(cfg.get("exit_hold_to_settlement", False))
+        self._tp_enabled = bool(cfg.get("exit_tp_enabled", True))
+        self._sl_enabled = bool(cfg.get("exit_sl_enabled", True))
+        self._tp_sl_disable_after_elapsed_sec = float(
+            cfg.get("exit_tp_sl_disable_after_elapsed_sec", 0.0)
+        )
+        self._cost_buffer_pct = float(cfg.get("exit_cost_buffer_pct", 0.0))
+        self._trailing_stop_pct = float(cfg.get("exit_trailing_stop_pct", 0.0))
+        self._trailing_activation_pct = float(
+            cfg.get("exit_trailing_activation_pct", 20.0)
+        )
 
     def check_exit(self, ctx: WindowContext) -> ExitSignal:
         """
         决策顺序：
-        1. 窗口到期 → 结算
-        2. 无效持仓 → 退出
-        3. PnL >= tp_pct → 止盈退出
-        4. PnL <= sl_pct → 止损退出
+        1. 无效持仓 → 退出
+        2. PnL >= tp_pct → 止盈退出
+        3. PnL <= sl_pct → 止损退出
+
+        窗口到期结算不在这里处理：SinglePositionStrategy 会在 tick 开头
+        把到期持仓移入 pending settlement 队列，等待 Gamma 结算结果后
+        再通过 PositionManager 结算，避免在已停止撮合的市场里挂卖单。
         """
         pos = ctx.position
         if not pos:
@@ -65,16 +89,6 @@ class ExitController:
 
         if getattr(pos, "_pending_close", False):
             return ExitSignal()
-
-        # 窗口到期 → 结算
-        if now >= pos.window_end:
-            exit_px = mkt._up_mid if (mkt and pos.side == Side.UP) else (mkt._down_mid if mkt else 0.5)
-            return ExitSignal(
-                should_exit=True,
-                reason=ExitReason.REASON_SETTLE,
-                exit_price_override=exit_px,
-                closed_at_override=now,
-            )
 
         # 无效持仓
         if pos.tokens_bought <= 1e-9:
@@ -101,17 +115,57 @@ class ExitController:
         if pnl_pct is None:
             return ExitSignal()
 
-        # 止盈
-        if pnl_pct >= pos.tp_pct:
+        # 更新峰值（移动止损使用）
+        if pos.peak_price <= 0 or current_price > pos.peak_price:
+            pos.peak_price = current_price
+        if pnl_pct > pos.peak_pnl_pct:
+            pos.peak_pnl_pct = pnl_pct
+
+        # TP/SL 是否生效：hold_to_settlement 或超过指定 elapsed 后交给结算
+        tp_sl_active = not self._hold_to_settlement
+        if (
+            self._tp_sl_disable_after_elapsed_sec > 0
+            and elapsed_s >= self._tp_sl_disable_after_elapsed_sec
+        ):
+            tp_sl_active = False
+
+        # 移动止损（优先级高于固定止盈止损）
+        if (
+            tp_sl_active
+            and self._trailing_stop_pct > 0
+            and pos.peak_pnl_pct >= self._trailing_activation_pct
+            and pnl_pct <= pos.peak_pnl_pct - self._trailing_stop_pct
+        ):
+            pos.tp_hit = {
+                "kind": "移动止损",
+                "elapsed_sec": elapsed_s,
+                "exit_price": current_price,
+                "pnl_pct": round(pnl_pct, 2),
+                "peak_pnl_pct": round(pos.peak_pnl_pct, 2),
+            }
+            logger.info(
+                "EXIT [{}] TRAILING_STOP: pnl={:+.1f}% <= peak={:+.1f}% - {:.1f}%",
+                pos.asset, pnl_pct, pos.peak_pnl_pct, self._trailing_stop_pct,
+            )
+            return ExitSignal(
+                should_exit=True,
+                reason=ExitReason.REASON_TRAILING,
+                tp_hit_data=pos.tp_hit,
+            )
+
+        # 止盈（成本缓冲：TP 阈值上移，避免把手续费/滑点算成利润）
+        effective_tp = pos.tp_pct + self._cost_buffer_pct
+        if tp_sl_active and self._tp_enabled and pnl_pct >= effective_tp:
             pos.tp_hit = {
                 "kind": ExitReason.TAKE_PROFIT,
                 "elapsed_sec": elapsed_s,
                 "exit_price": current_price,
                 "pnl_pct": round(pnl_pct, 2),
+                "effective_tp_pct": round(effective_tp, 2),
             }
             logger.info(
-                "EXIT [{}] TAKE_PROFIT: pnl={:+.1f}% >= tp={:.1f}%",
-                pos.asset, pnl_pct, pos.tp_pct,
+                "EXIT [{}] TAKE_PROFIT: pnl={:+.1f}% >= tp={:.1f}% (base={:.1f}% + cost={:.1f}%)",
+                pos.asset, pnl_pct, effective_tp, pos.tp_pct, self._cost_buffer_pct,
             )
             return ExitSignal(
                 should_exit=True,
@@ -119,17 +173,19 @@ class ExitController:
                 tp_hit_data=pos.tp_hit,
             )
 
-        # 止损
-        if pnl_pct <= pos.sl_pct:
+        # 止损（成本缓冲：SL 阈值下移）
+        effective_sl = pos.sl_pct - self._cost_buffer_pct
+        if tp_sl_active and self._sl_enabled and pnl_pct <= effective_sl:
             pos.tp_hit = {
                 "kind": ExitReason.STOP_LOSS,
                 "elapsed_sec": elapsed_s,
                 "exit_price": current_price,
                 "pnl_pct": round(pnl_pct, 2),
+                "effective_sl_pct": round(effective_sl, 2),
             }
             logger.info(
-                "EXIT [{}] STOP_LOSS: pnl={:+.1f}% <= sl={:.1f}%",
-                pos.asset, pnl_pct, pos.sl_pct,
+                "EXIT [{}] STOP_LOSS: pnl={:+.1f}% <= sl={:.1f}% (base={:.1f}% - cost={:.1f}%)",
+                pos.asset, pnl_pct, effective_sl, pos.sl_pct, self._cost_buffer_pct,
             )
             return ExitSignal(
                 should_exit=True,
@@ -176,15 +232,11 @@ class ExitController:
                 ctx=ctx,
             )
 
-        elif reason == ExitReason.REASON_SETTLE:
-            _, _, _, _, up_wins = await self._pos_mgr.settle_if_due(
-                pos, resolved_market=ctx.market,
-            )
+        elif reason == ExitReason.REASON_TRAILING:
             await self.spawn_close(
-                asset, pos, ExitReason.REASON_SETTLE,
+                asset, pos, ExitReason.TRAILING_STOP,
                 live_trader=live_trader,
                 ctx=ctx,
-                settle_up_wins=up_wins,
             )
 
         elif reason == ExitReason.REASON_INVALID:
@@ -215,6 +267,20 @@ class ExitController:
             name=f"close-{asset}",
         )
 
+    def _record_risk(self, pos: OpenPosition) -> None:
+        """把已实现盈亏上报给主策略风控（每个持仓只上报一次）。"""
+        if self._risk_manager is None or getattr(pos, "_risk_recorded", False):
+            return
+        pos._risk_recorded = True
+        try:
+            self._risk_manager.record_exit(
+                float(getattr(pos, "_last_pnl_usd", 0.0) or 0.0),
+                float(getattr(pos, "_last_pnl_pct", 0.0) or 0.0),
+            )
+        except Exception as exc:
+            # 风控统计失败不能影响已经完成的平仓流程
+            logger.warning("RISK record_exit failed for {}: {}", pos.asset, exc)
+
     async def _do_close(
         self,
         asset: str,
@@ -227,8 +293,13 @@ class ExitController:
     ) -> None:
 
         def _cleanup():
-            ctx.on_exit_complete()
-            ctx._pending_close = False
+            # 只有当 ctx 仍指向本持仓时才清理 ctx 状态：
+            # 平仓任务可能跨越窗口切换，此时的 ctx 已属于新窗口，
+            # 不能误清掉新窗口的持仓 / pending 标记。
+            if ctx.position is pos:
+                ctx.on_exit_complete()
+            if ctx.condition_id == pos.condition_id:
+                ctx._pending_close = False
             pos._pending_close = False
             pos.sell_retry_count = 0
 
@@ -259,6 +330,7 @@ class ExitController:
                 settle_up_wins=settle_up_wins,
                 partial_close_pct=partial_close_pct,
             )
+            self._record_risk(pos)
             _cleanup()
 
             if tp_hit:
@@ -279,6 +351,7 @@ class ExitController:
             logger.info("EXIT [{}] already sold, pnl={:.2f}u", asset, exc.pnl_usd or 0)
             pos._last_pnl_pct = exc.pnl_pct
             pos._last_pnl_usd = exc.pnl_usd
+            self._record_risk(pos)
             _cleanup()
             return
 
@@ -294,9 +367,11 @@ class ExitController:
                         live_trader=live_trader,
                         resolved_market=resolved_mkt,
                     )
+                    self._record_risk(pos)
                     _cleanup()
                     return
                 except AlreadyClosedError:
+                    self._record_risk(pos)
                     _cleanup()
                     return
                 except Exception as inner_exc:
@@ -327,6 +402,7 @@ class ExitController:
                             live_trader=live_trader,
                             resolved_market=resolved_mkt,
                         )
+                        self._record_risk(pos)
                         _cleanup()
                         return
                     except Exception as retry_exc:

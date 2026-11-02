@@ -103,14 +103,49 @@ async def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = K
         return None
     try:
         return {
-            "closes":  [float(r[4]) for r in data],
-            "highs":   [float(r[2]) for r in data],
-            "lows":    [float(r[3]) for r in data],
-            "volumes": [float(r[5]) for r in data],
+            "times":            [int(r[0]) for r in data],
+            "closes":           [float(r[4]) for r in data],
+            "highs":            [float(r[2]) for r in data],
+            "lows":             [float(r[3]) for r in data],
+            "volumes":          [float(r[5]) for r in data],
+            # Binance kline field 9 = taker buy base-asset volume.
+            # CVD(bar) = 2 * taker_buy_volume - total_volume
+            "taker_buy_volumes": [float(r[9]) for r in data],
         }
     except (IndexError, ValueError) as exc:
         logger.debug("Failed to parse klines: {}", exc)
         return None
+
+
+def closed_bar_series(klines: dict | None) -> dict:
+    """
+    Return the klines with the final (still-forming) bar removed.
+
+    Binance returns the current in-progress candle as the last element.
+    Signal decisions must only use closed candles, otherwise RSI/MACD/EMA
+    values flicker on every tick.
+    """
+    if not klines:
+        return {}
+    out: dict = {}
+    for key, value in klines.items():
+        if isinstance(value, list):
+            out[key] = value[:-1] if len(value) > 1 else value
+        else:
+            out[key] = value
+    return out
+
+
+def cvd_from_klines(klines: dict | None) -> float:
+    """Per-bar CVD from the last closed 1m kline (base-asset units)."""
+    if not klines:
+        return 0.0
+    closed = closed_bar_series(klines)
+    vols = closed.get("volumes") or []
+    tb = closed.get("taker_buy_volumes") or []
+    if not vols or not tb or len(vols) != len(tb):
+        return 0.0
+    return 2.0 * tb[-1] - vols[-1]
 
 
 async def fetch_binance_funding(symbol: str) -> float | None:
@@ -307,11 +342,17 @@ def _build_liquidation(asset: str, current_price: float) -> dict:
 
 
 async def _ensure_liq_ws(asset: str):
-    """Start liquidation WS if not already running. Guards against concurrent duplicate task creation."""
+    """
+    Start liquidation WS if not already running.
+
+    A task that is still alive (including its internal reconnect/backoff loop)
+    must not be duplicated. Only create a new task when the previous one is done.
+    """
     async with _liq_ws_lock:
-        if _liq_ws.get(asset) is None or _liq_ws_running.get(asset, False) is False:
-            t = asyncio.create_task(_liq_ws_listener(asset))
-            _liq_ws[asset] = t
+        task = _liq_ws.get(asset)
+        if task is not None and not task.done():
+            return
+        _liq_ws[asset] = asyncio.create_task(_liq_ws_listener(asset))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -580,8 +621,8 @@ async def get_indicators(asset: str = "BTC"):
             _cache[obi_key] = (val, now)
     obi_data = _cache.get(obi_key, ({"value": 1.0, "bid_vol": 0.0, "ask_vol": 0.0}, 0))[0]
 
-    # ── 7. CVD: net buy/sell pressure from last 500 aggTrades ─────────────────
-    cvd_val = await fetch_binance_cvd(symbol_spot)
+    # ── 7. CVD: taker buy/sell delta of the last closed 1m bar ───────────────
+    cvd_val = cvd_from_klines(klines)
 
     # ── 8. Liquidation WebSocket ─────────────────────────────────────────────
     await _ensure_liq_ws(asset)
@@ -872,7 +913,7 @@ async def get_signal_recommendation(asset: str = "BTC"):
             _cache[obi_key] = (val, now_ts)
     obi_data = _cache.get(obi_key, ({"value": 1.0}, 0))[0]
 
-    cvd_val = await fetch_binance_cvd(symbol_spot) or 0.0
+    cvd_val = cvd_from_klines(klines)
 
     # Liquidation
     await _ensure_liq_ws(asset)

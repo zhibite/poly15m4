@@ -16,12 +16,17 @@ strategy.py — Polymarket BTC/ETH 信号驱动策略（15m Up/Down）
 
 import asyncio
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from loguru import logger
 
+from app.api.indicators import (
+    _build_liquidation as build_liquidation,
+    _ensure_liq_ws,
+    cvd_from_klines,
+)
 from app.config import settings
 from app.models import Side
 from app.pm_client import PolymarketClient
@@ -30,8 +35,9 @@ from app.strategy.decision_logger import DecisionLogger
 from app.strategy.entry_controller import EntryController
 from app.strategy.exit_controller import ExitController
 from app.strategy.market_service import MarketService
-from app.strategy.position_manager import PositionManager
-from app.strategy.position_state import PositionState
+from app.strategy.position_manager import AlreadyClosedError, PositionManager
+from app.strategy.position_state import ExitReason, PositionState
+from app.strategy.risk_manager import RiskManager
 from app.strategy.window_context import WindowContext
 from app.strategy.window_manager import WindowManager
 from app.strategy.models import MarketInfo, OpenPosition
@@ -56,6 +62,7 @@ class SinglePositionStrategy:
         self._pos_mgr: Optional[PositionManager] = None
         self._logger: Optional[DecisionLogger] = None
         self._wm: Optional[WindowManager] = None
+        self._risk = RiskManager()
         # 类型：dict[str, IndicatorSignalService]，key 为 "BTC" / "ETH"
         self._ind_svc: dict[str, IndicatorSignalService] = {}
         self._end_strategy: Optional[EndWindowStrategy] = None
@@ -69,6 +76,12 @@ class SinglePositionStrategy:
         self._ind_cvd_baseline: dict[str, list[float]] = {}
         self._poll_counter = 0
         self._last_push_ts: float = 0.0
+
+        # 窗口到期后等待 Gamma 结算的持仓（按 condition_id）。
+        # 这些持仓已从 WindowContext 移出，避免窗口切换时被清空。
+        self._pending_settlements: dict[str, OpenPosition] = {}
+        self._settlement_tasks: dict[str, asyncio.Task] = {}
+        self._settle_next_attempt: dict[str, float] = {}
 
         # 运行时参数（由 _sync_config 同步到子控制器）
         self.market_interval_slug: str = "15m"
@@ -93,9 +106,6 @@ class SinglePositionStrategy:
             timeout=httpx.Timeout(10.0, connect=5.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
-
-        # 清算热力图滚动桶（策略自维护，不依赖 indicators.py 的 WS）
-        self._liq_buckets: dict[str, list[dict]] = {}
 
     async def start(self) -> bool:
         async with self._running_lock:
@@ -123,16 +133,14 @@ class SinglePositionStrategy:
         self._live_trader = trader
         if trader is not None:
             trader.set_pm_client(self.pm)
-            # Controllers were initialized with the old (possibly None) trader reference.
-            # Inject the new trader so live-mode entries/exits work immediately.
-            if self._entry_ctrl is not None:
-                self._entry_ctrl._live_trader = trader
-            if self._exit_ctrl is not None:
-                self._exit_ctrl._live_trader = trader
-            # end_strategy.tick() receives live_trader as a parameter from run_forever,
-            # but we also store it here so _do_close can access it asynchronously.
-            if self._end_strategy is not None:
-                self._end_strategy._live_trader = trader
+        # 无论 trader 是新增还是被清除（None），都要同步到控制器，
+        # 避免钱包/凭证失效后控制器仍持有旧的 LiveTrader 引用。
+        if self._entry_ctrl is not None:
+            self._entry_ctrl._live_trader = trader
+        # end_strategy.tick() receives live_trader as a parameter from run_forever,
+        # but we also store it here so _do_close can access it asynchronously.
+        if self._end_strategy is not None:
+            self._end_strategy._live_trader = trader
 
     def _symbols_enabled(self) -> list[str]:
         cfg = get_config()
@@ -166,6 +174,7 @@ class SinglePositionStrategy:
             pos_mgr=self._pos_mgr,
             wm=self._wm,
             decision_logger=self._logger,
+            risk_manager=self._risk,
         )
         # 末端策略必须在 _exit_ctrl 之后创建，以便注入 pos_mgr
         self._end_strategy = EndWindowStrategy(pos_mgr=self._pos_mgr, pm=self.pm)
@@ -175,6 +184,7 @@ class SinglePositionStrategy:
             live_trader=self._live_trader,
             logger=self._logger,
             signal_svc=self._ind_svc,
+            risk_manager=self._risk,
         )
         self._wm = WindowManager(
             self._market_svc, self.ALL_SYMBOLS,
@@ -214,6 +224,13 @@ class SinglePositionStrategy:
             self._exit_ctrl.sync_params(cfg)
         if self._end_strategy:
             self._end_strategy.sync_params(cfg)
+
+        for svc in self._ind_svc.values():
+            svc.set_thresholds(
+                oi_change_significant=float(cfg.get("oi_change_significant", 0.02)),
+            )
+
+        self._risk.sync_params(cfg)
 
         if self._live_trader is not None:
             self._live_trader.slippage_pct = float(self.live_slippage_pct)
@@ -274,6 +291,115 @@ class SinglePositionStrategy:
         except Exception as exc:
             logger.warning("R11 _check_position_integrity failed: {}. Continuing startup.", exc)
 
+    # ── 到期持仓结算（跨窗口保留）────────────────────────────────────────
+
+    def _handoff_expired_positions(self) -> None:
+        """
+        把已到期的持仓从 WindowContext 移入 _pending_settlements。
+
+        WindowManager 发现新窗口时会调用 ctx.reset_for_new_window()，
+        该方法会清空 ctx.position；因此必须在 tick() 之前完成移交。
+        正在平仓（_pending_close=True）的持仓不移交，交由原平仓任务处理。
+        """
+        if not self._wm:
+            return
+        now = datetime.now(timezone.utc)
+        for asset in self.ALL_SYMBOLS:
+            ctx = self._wm.get(asset)
+            if ctx is None or ctx.position is None:
+                continue
+            pos = ctx.position
+            if getattr(pos, "_pending_close", False):
+                continue
+            # 允许提前 1s 移交（约一个轮询周期），避免 handoff 与 tick 之间
+            # 恰好跨过 window_end 时被 reset_for_new_window() 清空。
+            if now < pos.window_end - timedelta(seconds=1.0):
+                continue
+
+            ctx.position = None
+            ctx.state = PositionState.NO_POSITION
+            ctx._pending_close = False
+            self._pending_settlements[pos.condition_id] = pos
+            logger.info(
+                "SETTLE handoff [{}] condition={} window_end={} — awaiting resolution",
+                asset, pos.condition_id[:12], pos.window_end.isoformat(),
+            )
+
+    def _schedule_pending_settlements(self) -> None:
+        """每个 tick 调用：为待结算持仓调度（或跳过已在运行的）异步结算任务。"""
+        if not self._pending_settlements or self._pos_mgr is None:
+            return
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        for cid, pos in list(self._pending_settlements.items()):
+            task = self._settlement_tasks.get(cid)
+            if task is not None and not task.done():
+                continue
+            # 简单节流：未出结果时最多每 3 秒查询一次 Gamma
+            if now_ts < self._settle_next_attempt.get(cid, 0.0):
+                continue
+            self._settle_next_attempt[cid] = now_ts + 3.0
+            self._settlement_tasks[cid] = asyncio.create_task(
+                self._settle_one(cid, pos),
+                name=f"settle-{pos.asset}-{cid[:8]}",
+            )
+
+    async def _settle_one(self, condition_id: str, pos: OpenPosition) -> None:
+        """查询结算结果；拿到结果后通过 PositionManager 平仓/赎回并写 DB。"""
+        try:
+            settled, _, _, _, up_wins = await self._pos_mgr.settle_if_due(pos)
+            if not settled:
+                return
+
+            await self._pos_mgr.close_position(
+                pos,
+                ExitReason.SETTLE,
+                live_trader=self._live_trader if self.live_mode else None,
+                resolved_market=pos.market,
+                settle_up_wins=up_wins,
+            )
+            if not getattr(pos, "_risk_recorded", False):
+                pos._risk_recorded = True
+                try:
+                    self._risk.record_exit(
+                        float(getattr(pos, "_last_pnl_usd", 0.0) or 0.0),
+                        float(getattr(pos, "_last_pnl_pct", 0.0) or 0.0),
+                    )
+                except Exception as risk_exc:
+                    logger.warning("RISK record_exit failed for {}: {}", pos.asset, risk_exc)
+            self._pending_settlements.pop(condition_id, None)
+            self._settle_next_attempt.pop(condition_id, None)
+            logger.info(
+                "SETTLE complete [{}] condition={} up_wins={} pnl={:+.2f}%",
+                pos.asset, condition_id[:12], up_wins, pos._last_pnl_pct,
+            )
+        except AlreadyClosedError as exc:
+            # 代币已经全部卖出/赎回，视为结算完成，避免无限重试
+            self._pending_settlements.pop(condition_id, None)
+            self._settle_next_attempt.pop(condition_id, None)
+            if not getattr(pos, "_risk_recorded", False):
+                pos._risk_recorded = True
+                pos._last_pnl_usd = float(exc.pnl_usd or 0.0)
+                pos._last_pnl_pct = float(exc.pnl_pct or 0.0)
+                try:
+                    self._risk.record_exit(pos._last_pnl_usd, pos._last_pnl_pct)
+                except Exception as risk_exc:
+                    logger.warning("RISK record_exit failed for {}: {}", pos.asset, risk_exc)
+            logger.info(
+                "SETTLE [{}] condition={} already closed: pnl={:.2f}u",
+                pos.asset, condition_id[:12], exc.pnl_usd or 0.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 保留在 pending 队列，下个 tick 再试
+            logger.exception(
+                "SETTLE failed [{}] condition={}: {} — will retry",
+                pos.asset, condition_id[:12], exc,
+            )
+        finally:
+            self._settlement_tasks.pop(condition_id, None)
+
     # ── 主循环 ──────────────────────────────────────────────────────────
 
     async def run_forever(self):
@@ -286,6 +412,14 @@ class SinglePositionStrategy:
             self.entry_early_start_elapsed_sec, self.entry_late_cutoff_elapsed_sec,
         )
         await self._check_position_integrity()
+        await self._risk.load_from_db()
+
+        # 启动清算数据 WebSocket（策略与 dashboard 共用 indicators 模块的 buckets）
+        try:
+            for asset in self.ALL_SYMBOLS:
+                await _ensure_liq_ws(asset)
+        except Exception as exc:
+            logger.warning("Liquidation WS start failed: {}", exc)
 
         self._running = True
 
@@ -299,6 +433,7 @@ class SinglePositionStrategy:
                     logger.info("Strategy resumed — refreshing market prices")
                     self._prev_running = True
                     self._sync_config()
+                    self._handoff_expired_positions()
                     ctxs = await self._wm.tick(list(self.ALL_SYMBOLS))
                     await self._push_state(ctxs)
                     self._last_push_ts = datetime.now(timezone.utc).timestamp()
@@ -306,6 +441,10 @@ class SinglePositionStrategy:
                     continue
 
                 self._sync_config()
+
+                # 必须在 WindowManager.tick() 之前移出到期持仓，否则窗口切换时
+                # WindowContext.reset_for_new_window() 会直接清空 ctx.position。
+                self._handoff_expired_positions()
 
                 ctxs = await self._wm.tick(list(self.ALL_SYMBOLS))
 
@@ -321,23 +460,19 @@ class SinglePositionStrategy:
                         symbol = f"{asset}USDT"
 
                         funding, oi, obi = await self._fetch_cached_indicators(symbol, now_ts)
-                        klines, cvd = await asyncio.gather(
-                            self._fetch_klines(symbol),
-                            self._fetch_cvd(symbol),
-                        )
+                        klines = await self._fetch_klines(symbol)
                         closes  = klines.get("closes", [])  if klines  else []
                         highs   = klines.get("highs", [])   if klines  else []
                         lows    = klines.get("lows", [])    if klines  else []
                         volumes = klines.get("volumes", []) if klines  else []
 
                         spot_price = closes[-1] if closes else 0.0
-                        liq = self._build_liquidation(asset, spot_price)
+                        # 与 dashboard / 信号服务共用同一份清算数据（indicators 模块的 WS）
+                        liq = build_liquidation(asset, spot_price)
 
-                        # _ind_cvd_baseline 保留用于 _push_state 中的本地 Z-score 计算，
-                        # 内部更新由 IndicatorSignalService.get_indicators() 完成（单次写入），
-                        # strategy 层不再重复追加，避免滚动基准被加速消耗（每 tick 写 2 次）。
-                        # 当前 cvd_val 传入供 get_indicators() 内部使用。
-                        cvd_val = cvd if cvd is not None else 0.0
+                        # CVD 直接来自最后一根已收盘 1m K 线的 taker buy volume，
+                        # 避免额外请求 aggTrades，也避免每 tick 滚动窗口的噪声。
+                        cvd_val = cvd_from_klines(klines)
 
                         ind = await self._ind_svc[asset].get_indicators(
                             closes=closes, highs=highs, lows=lows, volumes=volumes,
@@ -356,6 +491,14 @@ class SinglePositionStrategy:
 
                 # 监控日志：每5秒输出所有活跃窗口的价格
                 self._poll_counter += 1
+
+                # 每 60s 确保清算 WS 仍在运行（内部最多重连 5 次后会退出）
+                if self._poll_counter % 60 == 0:
+                    for asset in self.ALL_SYMBOLS:
+                        try:
+                            await _ensure_liq_ws(asset)
+                        except Exception:
+                            pass
                 if self._poll_counter % 5 == 0:
                     for a, ctx in ctxs.items():
                         if ctx and ctx.market:
@@ -370,6 +513,16 @@ class SinglePositionStrategy:
                             )
 
                 ops = self._symbols_operational()
+
+                # 全局暴露上限：主策略持仓 + 末端持仓 + 待结算持仓
+                max_open = int(float(get_config().get("max_open_positions_total", 4)))
+                open_count = sum(1 for c in ctxs.values() if c.position is not None)
+                if self._end_strategy is not None:
+                    open_count += sum(
+                        1 for a in self.ALL_SYMBOLS
+                        if self._end_strategy.has_position(a)
+                    )
+                open_count += len(self._pending_settlements)
 
                 # 退出检查
                 for asset in ops:
@@ -392,7 +545,14 @@ class SinglePositionStrategy:
                         continue
                     if ctx.position is not None and getattr(ctx.position, "_pending_close", False):
                         continue
-                    await self._entry_ctrl.check_entry(asset, ctx)
+                    # 同一窗口不叠加：末端策略已有持仓时主策略不再入场
+                    if self._end_strategy is not None and self._end_strategy.has_position(asset):
+                        continue
+                    if open_count >= max_open:
+                        continue
+                    entry_result = await self._entry_ctrl.check_entry(asset, ctx)
+                    if entry_result.triggered:
+                        open_count += 1
 
                 # 3. 末端策略 tick（T=12min~14.5min，独立入场/退出）
                 if self._end_strategy:
@@ -407,15 +567,13 @@ class SinglePositionStrategy:
                             if not ctx or not ctx.market:
                                 continue
                             sig_result = self._latest_indicators.get(asset)
-                            main_has_pos = (
-                                ctx.position is not None
-                                if ctxs.get(asset) else False
-                            )
+                            # 主策略在本窗口有持仓或已经交易过 → 末端策略跳过（不叠加）
+                            main_has_pos = (ctx.position is not None) or ctx.is_traded
                             main_dir = (
                                 ctx.position.side.value
                                 if ctx.position else "NONE"
                             )
-                            await self._end_strategy.tick(
+                            acted, desc = await self._end_strategy.tick(
                                 asset=asset,
                                 ctx=ctx,
                                 indicator_signal_result=sig_result,
@@ -423,10 +581,16 @@ class SinglePositionStrategy:
                                 main_direction=main_dir,
                                 live_trader=self._live_trader if self.live_mode else None,
                                 market_duration_sec=float(self.market_duration_sec),
+                                allow_entry=open_count < max_open,
                             )
+                            if acted and desc.startswith("entered"):
+                                open_count += 1
 
                 # 3. FOK 重试
                 await self._entry_ctrl.fire_entry_retries(ctxs)
+
+                # 4. 到期持仓等待 Gamma 结算（异步任务，避免阻塞主循环）
+                self._schedule_pending_settlements()
 
                 # 5. 推送状态
                 now_ts = datetime.now(timezone.utc).timestamp()
@@ -477,6 +641,67 @@ class SinglePositionStrategy:
                 "mid": cur,
             }
 
+        # 末端策略独立持仓（不在 ctx.position 中）
+        end_positions: dict[str, dict] = {}
+        if self._end_strategy:
+            for a in self.ALL_SYMBOLS:
+                ep = self._end_strategy.get_position(a)
+                if ep is None:
+                    continue
+                ctx = ctxs.get(a) or (self._wm.get(a) if self._wm else None)
+                mkt = ctx.market if ctx and ctx.market else ep.market
+                um = mkt._up_mid if mkt else 0.5
+                dn = mkt._down_mid if mkt else 0.5
+                cur = um if ep.direction == "UP" else dn
+                pnl = self._end_strategy._calc_pnl_pct(ep, um, dn)
+                conf = self._end_strategy.get_confidence(a)
+                end_positions[a] = {
+                    "side": ep.direction,
+                    "tokens": ep.tokens_bought,
+                    "entry_price": ep.entry_price,
+                    "vwap": ep.effective_entry_price,
+                    "actual_cost_usdc": ep.actual_cost_usdc,
+                    "window_end": ep.window_end.isoformat() if ep.window_end else "",
+                    "unrealized_pnl_pct": pnl,
+                    "unrealized_pnl": round(ep.actual_cost_usdc * pnl / 100.0, 4),
+                    "confidence_total": conf.total if conf else 0.0,
+                    "confidence": (
+                        {
+                            "D1": conf.D1_signal,
+                            "D2": conf.D2_deviation,
+                            "D3": conf.D3_momentum,
+                            "D4": conf.D4_reversal,
+                            "D5": conf.D5_liquidity,
+                        }
+                        if conf else None
+                    ),
+                    "entry_core_agree": ep.entry_core_agree,
+                    "mid": cur,
+                }
+
+        # 最近的因子快照（shadow 模式可直接在 /ws/live 观察）
+        latest_factors: dict[str, dict] = {}
+        if self._entry_ctrl is not None:
+            for a in self.ALL_SYMBOLS:
+                f = self._entry_ctrl.latest_factor_snapshot(a)
+                if f:
+                    latest_factors[a] = f
+
+        # 到期后等待 Gamma 结算的持仓
+        settling_positions = [
+            {
+                "asset": p.asset,
+                "condition_id": (p.condition_id[:12] + "...") if p.condition_id else "",
+                "side": p.side.value,
+                "tokens": p.tokens_bought,
+                "entry_price": p.effective_entry_price,
+                "actual_cost_usdc": p.actual_cost_usdc,
+                "window_end": p.window_end.isoformat() if p.window_end else "",
+                "status": "awaiting_resolution",
+            }
+            for p in self._pending_settlements.values()
+        ]
+
         cfg = get_config()
         new_state = {
             "_type": "state",
@@ -511,6 +736,12 @@ class SinglePositionStrategy:
                 for a, ctx in self._wm._ctxs.items()
             },
             "open_positions": outs,
+            "end_enabled": bool(cfg.get("end_enabled", False)),
+            "end_positions": end_positions,
+            "settling_positions": settling_positions,
+            "risk": self._risk.snapshot(),
+            "factors": latest_factors,
+            "factor_mode": int(float(get_config().get("factor_mode", 0))),
             # 实时指标（策略 tick 时预取计算，通过 /ws/live 和 /ws/indicators 推送）
             "indicators": dict(self._latest_indicators),
         }
@@ -529,10 +760,12 @@ class SinglePositionStrategy:
             r.raise_for_status()
             data = r.json()
             return {
-                "closes":  [float(row[4]) for row in data],
-                "highs":   [float(row[2]) for row in data],
-                "lows":    [float(row[3]) for row in data],
-                "volumes": [float(row[5]) for row in data],
+                "times":            [int(row[0]) for row in data],
+                "closes":           [float(row[4]) for row in data],
+                "highs":            [float(row[2]) for row in data],
+                "lows":             [float(row[3]) for row in data],
+                "volumes":          [float(row[5]) for row in data],
+                "taker_buy_volumes": [float(row[9]) for row in data],
             }
         except Exception:
             return None
@@ -573,23 +806,6 @@ class SinglePositionStrategy:
             av = sum(float(q) for _, q in asks)
             obi = bv / av if av > 0 else 1.0
             return {"bid_vol": bv, "ask_vol": av, "value": obi}
-        except Exception:
-            return None
-
-    async def _fetch_cvd(self, symbol: str) -> float | None:
-        try:
-            r = await self._http_client.get(
-                "https://api.binance.com/api/v3/aggTrades",
-                params={"symbol": symbol, "limit": 500},
-            )
-            r.raise_for_status()
-            data = r.json()
-            delta = 0.0
-            for t in data:
-                qty = float(t.get("q", 0))
-                maker = t.get("m", True)
-                delta += qty if not maker else -qty
-            return delta
         except Exception:
             return None
 
@@ -660,49 +876,24 @@ class SinglePositionStrategy:
 
         return funding, oi, obi
 
-    # ── 策略自维护的清算热力图（不依赖 WS）───────────────────────────────
-    def _build_liquidation(self, asset: str, current_price: float) -> dict:
-        buckets = self._liq_buckets.get(asset, [])
-        long_qty = 0.0
-        short_qty = 0.0
-        long_prices = []
-        short_prices = []
-
-        for b in buckets:
-            if b["direction"] == "long":
-                long_qty += b["qty"]
-                long_prices.append(b["price"])
-            else:
-                short_qty += b["qty"]
-                short_prices.append(b["price"])
-
-        long_dist = (min(long_prices) - current_price) / current_price if long_prices else -0.02
-        short_dist = (max(short_prices) - current_price) / current_price if short_prices else 0.02
-
-        total = long_qty + short_qty
-        if total <= 0:
-            return {
-                "long_dist": -0.02, "short_dist": 0.02,
-                "long_pct": 0.5, "short_pct": 0.5,
-                "signal": "neutral",
-            }
-
-        return {
-            "long_dist":  long_dist,
-            "short_dist": short_dist,
-            "long_pct":   long_qty / total,
-            "short_pct":  short_qty / total,
-            "signal": "down_magnet" if abs(long_dist) < abs(short_dist) else "up_magnet",
-        }
-
-    async def _push_liquidation_tick(self, asset: str, price: float, qty: float, direction: str) -> None:
-        """每次 Binance aggTrade 推送时由主循环追加清算数据（每 5s 批量更新一次）"""
-        bucket = {"price": price, "qty": qty, "direction": direction, "ts": datetime.now(timezone.utc).timestamp()}
-        self._liq_buckets.setdefault(asset, []).append(bucket)
-        cutoff = datetime.now(timezone.utc).timestamp() - 30 * 60
-        self._liq_buckets[asset] = [b for b in self._liq_buckets[asset] if b["ts"] > cutoff]
-
     async def close(self):
+        # Cancel pending settlement tasks best-effort. Positions that were mid-close
+        # remain in _pending_settlements only in memory; a restart requires manual
+        # reconciliation (tokens stay in the wallet).
+        tasks = [t for t in self._settlement_tasks.values() if t and not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._settlement_tasks.clear()
+
+        if self._pending_settlements:
+            logger.warning(
+                "Shutdown with {} unsettled position(s): {} — manual redemption may be required",
+                len(self._pending_settlements),
+                [f"{p.asset}:{cid[:8]}" for cid, p in self._pending_settlements.items()],
+            )
+
         await self.pm.close()
         if self._live_trader:
             self._live_trader.close()

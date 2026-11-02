@@ -72,7 +72,7 @@ class WindowContext:
     # 保留最近 16 条（T=15min = 15 条 + 1 条缓冲）
     up_samples: list[float] = field(default_factory=list)
     # 上次追加时的 UTC 分钟数（避免每 tick 重复追加同一条价格）
-    _last_append_minute: int = field(default_factory=-1, repr=False)
+    _last_append_minute: int = field(default=-1, repr=False)
 
     # ── 便捷属性 ──────────────────────────────────────────────────────────
 
@@ -119,6 +119,16 @@ class WindowContext:
         # If a fill-save failed in the previous window, the orphan flag is no longer
         # relevant after a new window begins.
         if self.position is not None:
+            # 正常流程下，到期持仓会先由 SinglePositionStrategy._handoff_expired_positions()
+            # 移入 pending settlement 队列；走到这里说明窗口切换发生在 handoff 之前，
+            # 属于异常时序，记录告警以便排查。
+            logger.warning(
+                "reset_for_new_window [{}] discarding non-expired position "
+                "(condition={}, window_end={}) — was it handed off?",
+                self.asset,
+                self.position.condition_id[:12] if self.position.condition_id else "",
+                self.position.window_end.isoformat() if self.position.window_end else "",
+            )
             self.position._is_orphan_position = False
         self.position = None
         self._pending_close = False

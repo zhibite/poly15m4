@@ -133,9 +133,57 @@ class Trade(Base):
     bet_usdc = Column(Float, nullable=False)
     mode = Column(String(8), default="dry", nullable=False)
     fills = Column(Integer, default=1, nullable=False)
+    # main / end — 用于分析两套策略的独立表现
+    strategy = Column(String(8), default="main", nullable=False, index=True)
+    entry_core_agree = Column(Integer, default=0, nullable=False)
 
     opened_at = Column(DateTime, default=_utcnow)
     closed_at = Column(DateTime, default=_utcnow)
+
+
+class DecisionSnapshot(Base):
+    """
+    每次「新 bar 信号计算」保存一份完整决策快照，用于事后的信号有效性分析。
+
+    只保存主策略 EntryController 的决策；末端策略的置信度可通过 EntryRecord/
+    Trade 的 strategy='end' 区分分析。
+    """
+    __tablename__ = "decision_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+    asset = Column(String, index=True, nullable=False)
+    condition_id = Column(String, index=True, nullable=False)
+    bar_ts = Column(Integer, default=0, nullable=False, index=True)
+    window_start = Column(DateTime, nullable=True)
+    elapsed_sec = Column(Float, default=0.0)
+    mode = Column(String(8), default="dry", nullable=False)
+
+    up_mid = Column(Float, default=0.5)
+    down_mid = Column(Float, default=0.5)
+    decision_price = Column(Float, default=0.0)
+    direction = Column(String(8), default="NONE")
+    core_agree = Column(Integer, default=0)
+    core_contradict = Column(Integer, default=0)
+    strength = Column(Integer, default=0)
+    advanced_filter = Column(String(16), default="neutral")
+    suggested_action = Column(String(16), default="SKIP")
+    skip_reason = Column(Text, default="")
+
+    # 完整的 Core 6 / Advanced 5 详情（JSON 文本）
+    core_json = Column(Text, default="")
+    advanced_json = Column(Text, default="")
+
+    # 因子模型结果
+    factor_mode = Column(Integer, default=0)
+    factor_net = Column(Float, default=0.0)
+    factor_agreement = Column(Float, default=0.0)
+    factor_conflict = Column(Float, default=0.0)
+    factor_direction = Column(String(8), default="NONE")
+    factors_json = Column(Text, default="")
+
+    entered = Column(Integer, default=0, nullable=False)
+    entry_record_id = Column(Integer, nullable=True)
 
 
 class User(Base):

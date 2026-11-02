@@ -7,7 +7,15 @@ import os
 import pathlib
 import threading
 from loguru import logger
+from dotenv import load_dotenv
+
 from app.config import settings
+
+# 本地运行时把 .env 读入 os.environ，供下面的 _env()/_env_bool() 使用。
+# 已存在的环境变量优先（override=False），因此 Docker / shell 中显式设置的
+# 环境变量不会被 .env 覆盖。注意 app.config 已在 import 时校验 JWT_SECRET_KEY，
+# 不会因为这里加载 .env 而绕过该校验。
+load_dotenv()
 
 _ENV_PATH: str | None = None
 _creds_lock = threading.Lock()
@@ -100,6 +108,35 @@ _runtime: dict = {
     # ── Core 6 指标同向信号共识门槛 ─────────────────────────────────
     "core_agree_threshold":           int(float(_env("CORE_AGREE_THRESHOLD", "3"))),
     "core_agree_standard":           int(float(_env("CORE_AGREE_STANDARD", "3"))),
+    "core_contradict_limit":         int(float(_env("CORE_CONTRADICT_LIMIT", "1"))),
+    "entry_require_price_alignment": _env_bool("ENTRY_REQUIRE_PRICE_ALIGNMENT", False),
+    "entry_price_alignment_min_dev": float(_env("ENTRY_PRICE_ALIGNMENT_MIN_DEV", "0.02")),
+    "stake_mult_core3":              float(_env("STAKE_MULT_CORE3", "0.5")),
+    "stake_mult_core4":              float(_env("STAKE_MULT_CORE4", "1.0")),
+    "stake_mult_core5":              float(_env("STAKE_MULT_CORE5", "1.5")),
+    "stake_mult_core6":              float(_env("STAKE_MULT_CORE6", "2.0")),
+
+    # 可选：历史胜率 + 分数 Kelly 仓位
+    "use_kelly_sizing":              _env_bool("USE_KELLY_SIZING", False),
+    "kelly_fraction":                float(_env("KELLY_FRACTION", "0.25")),
+    "kelly_prior_weight":            float(_env("KELLY_PRIOR_WEIGHT", "20.0")),
+    "kelly_min_samples":             int(float(_env("KELLY_MIN_SAMPLES", "20"))),
+    "kelly_max_mult":                float(_env("KELLY_MAX_MULT", "2.0")),
+    "bankroll_usdc":                 float(_env("BANKROLL_USDC", "100.0")),
+
+    # ── 因子模型 ────────────────────────────────────────────────────
+    # 0=off, 1=shadow（只记录）, 2=live（用因子决策）
+    "factor_mode":                   int(float(_env("FACTOR_MODE", "0"))),
+    "factor_w_trend":                float(_env("FACTOR_W_TREND", "0.20")),
+    "factor_w_reversion":            float(_env("FACTOR_W_REVERSION", "0.15")),
+    "factor_w_price":                float(_env("FACTOR_W_PRICE", "0.35")),
+    "factor_w_micro":                float(_env("FACTOR_W_MICRO", "0.15")),
+    "factor_w_flow":                 float(_env("FACTOR_W_FLOW", "0.15")),
+    "factor_min_net":                float(_env("FACTOR_MIN_NET", "0.25")),
+    "factor_min_agreement":          float(_env("FACTOR_MIN_AGREEMENT", "0.60")),
+    "factor_rev_veto_score":         float(_env("FACTOR_REV_VETO_SCORE", "0.70")),
+    "factor_max_spread_bps":         float(_env("FACTOR_MAX_SPREAD_BPS", "100.0")),
+    "factor_oi_change_threshold":    float(_env("FACTOR_OI_CHANGE_THRESHOLD", "0.02")),
 
     # ── 止盈止损（entry_controller._calc_stop_levels）─────────────────────
     # TP = tp_base_pct + tp_range_pct × (entry_price_max_tp - entry_price) / range
@@ -110,10 +147,34 @@ _runtime: dict = {
     # 止损（固定 -10%）
     "sl_base_pct":            float(_env("SL_BASE_PCT", "-10.0")),
 
+    # ── 出场策略（可 A/B）────────────────────────────────────────────
+    # hold_to_settlement=True 时忽略 TP/SL，持有到窗口结算
+    "exit_hold_to_settlement":            _env_bool("EXIT_HOLD_TO_SETTLEMENT", False),
+    "exit_tp_enabled":                    _env_bool("EXIT_TP_ENABLED", True),
+    "exit_sl_enabled":                    _env_bool("EXIT_SL_ENABLED", True),
+    # >0 时，窗口 elapsed 超过该秒数后不再触发 TP/SL（交给结算）
+    "exit_tp_sl_disable_after_elapsed_sec": float(_env("EXIT_TP_SL_DISABLE_AFTER_ELAPSED_SEC", "0")),
+    # 成本缓冲：TP 上移、SL 下移，避免把手续费/滑点算成利润
+    "exit_cost_buffer_pct":               float(_env("EXIT_COST_BUFFER_PCT", "0.0")),
+    # 移动止损（0 = 关闭）
+    "exit_trailing_stop_pct":             float(_env("EXIT_TRAILING_STOP_PCT", "0")),
+    "exit_trailing_activation_pct":       float(_env("EXIT_TRAILING_ACTIVATION_PCT", "20.0")),
+
+    # ── 主策略风控 ─────────────────────────────────────────────────
+    # 每日最大已实现亏损（USDC，负值）；<= 该值后停止开新仓
+    "main_max_daily_loss_usdc":           float(_env("MAIN_MAX_DAILY_LOSS_USDC", "-20.0")),
+    # 连续亏损次数上限（0 = 关闭）+ 冷却时间
+    "main_max_consecutive_losses":        int(float(_env("MAIN_MAX_CONSECUTIVE_LOSSES", "3"))),
+    "main_loss_cooldown_sec":             int(float(_env("MAIN_LOSS_COOLDOWN_SEC", "900"))),
+    # 全局最大同时持仓数（主策略 + 末端策略 + 待结算）
+    "max_open_positions_total":           int(float(_env("MAX_OPEN_POSITIONS_TOTAL", "4"))),
+
     # ── 流动性过滤 ─────────────────────────────────────────────────────────
     "min_depth_coverage":     float(_env("MIN_DEPTH_COVERAGE", "2.0")),
     "max_slippage_pct":      float(_env("MAX_SLIPPAGE_PCT", "3.0")),
     "obi_contradict_skip":   float(_env("OBI_CONTRADICT_SKIP", "0.25")),
+    # OI 多少变化才算显著（默认 2%）
+    "oi_change_significant": float(_env("OI_CHANGE_SIGNIFICANT", "0.02")),
 
     # ── 末端顺势策略（end_window_strategy）─────────────────────────────
     "end_enabled":                    _env_bool("END_ENABLED", False),
@@ -155,6 +216,30 @@ _ENV_KEYS: dict[str, str] = {
     "min_exit_price":                 "MIN_EXIT_PRICE",
     "core_agree_threshold":           "CORE_AGREE_THRESHOLD",
     "core_agree_standard":           "CORE_AGREE_STANDARD",
+    "core_contradict_limit":         "CORE_CONTRADICT_LIMIT",
+    "entry_require_price_alignment": "ENTRY_REQUIRE_PRICE_ALIGNMENT",
+    "entry_price_alignment_min_dev": "ENTRY_PRICE_ALIGNMENT_MIN_DEV",
+    "stake_mult_core3":              "STAKE_MULT_CORE3",
+    "stake_mult_core4":              "STAKE_MULT_CORE4",
+    "stake_mult_core5":              "STAKE_MULT_CORE5",
+    "stake_mult_core6":              "STAKE_MULT_CORE6",
+    "use_kelly_sizing":              "USE_KELLY_SIZING",
+    "kelly_fraction":                "KELLY_FRACTION",
+    "kelly_prior_weight":            "KELLY_PRIOR_WEIGHT",
+    "kelly_min_samples":             "KELLY_MIN_SAMPLES",
+    "kelly_max_mult":                "KELLY_MAX_MULT",
+    "bankroll_usdc":                 "BANKROLL_USDC",
+    "factor_mode":                   "FACTOR_MODE",
+    "factor_w_trend":                "FACTOR_W_TREND",
+    "factor_w_reversion":            "FACTOR_W_REVERSION",
+    "factor_w_price":                "FACTOR_W_PRICE",
+    "factor_w_micro":                "FACTOR_W_MICRO",
+    "factor_w_flow":                 "FACTOR_W_FLOW",
+    "factor_min_net":                "FACTOR_MIN_NET",
+    "factor_min_agreement":          "FACTOR_MIN_AGREEMENT",
+    "factor_rev_veto_score":         "FACTOR_REV_VETO_SCORE",
+    "factor_max_spread_bps":         "FACTOR_MAX_SPREAD_BPS",
+    "factor_oi_change_threshold":    "FACTOR_OI_CHANGE_THRESHOLD",
     "entry_price_min":               "ENTRY_PRICE_MIN",
     "entry_price_max":               "ENTRY_PRICE_MAX",
     "tp_base_pct":                   "TP_BASE_PCT",
@@ -163,10 +248,26 @@ _ENV_KEYS: dict[str, str] = {
     "entry_price_max_tp":             "TP_ENTRY_PRICE_MAX",
     "sl_base_pct":             "SL_BASE_PCT",
 
+    # 出场策略
+    "exit_hold_to_settlement":             "EXIT_HOLD_TO_SETTLEMENT",
+    "exit_tp_enabled":                     "EXIT_TP_ENABLED",
+    "exit_sl_enabled":                     "EXIT_SL_ENABLED",
+    "exit_tp_sl_disable_after_elapsed_sec": "EXIT_TP_SL_DISABLE_AFTER_ELAPSED_SEC",
+    "exit_cost_buffer_pct":                "EXIT_COST_BUFFER_PCT",
+    "exit_trailing_stop_pct":              "EXIT_TRAILING_STOP_PCT",
+    "exit_trailing_activation_pct":        "EXIT_TRAILING_ACTIVATION_PCT",
+
+    # 主策略风控
+    "main_max_daily_loss_usdc":            "MAIN_MAX_DAILY_LOSS_USDC",
+    "main_max_consecutive_losses":         "MAIN_MAX_CONSECUTIVE_LOSSES",
+    "main_loss_cooldown_sec":              "MAIN_LOSS_COOLDOWN_SEC",
+    "max_open_positions_total":            "MAX_OPEN_POSITIONS_TOTAL",
+
     # 流动性过滤
     "min_depth_coverage":      "MIN_DEPTH_COVERAGE",
     "max_slippage_pct":       "MAX_SLIPPAGE_PCT",
     "obi_contradict_skip":    "OBI_CONTRADICT_SKIP",
+    "oi_change_significant":  "OI_CHANGE_SIGNIFICANT",
 
     # 末端顺势策略
     "end_enabled":                    "END_ENABLED",

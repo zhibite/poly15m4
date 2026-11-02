@@ -104,6 +104,7 @@ class EndWindowController:
         self._has_position[asset] = False
 
     # ── 每日亏损重置 ────────────────────────────────────────────────────────
+    # 注意：_daily_pnl 以 USDC 计，与 max_daily_loss（负值 USDC）同单位。
 
     def _check_daily_reset(self, asset: str) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -111,9 +112,10 @@ class EndWindowController:
             self._daily_pnl[asset] = 0.0
             self._last_trade_date[asset] = today
 
-    def record_pnl(self, asset: str, pnl: float) -> None:
+    def record_pnl(self, asset: str, pnl_usd: float) -> None:
+        """记录一笔已实现盈亏（USDC）。"""
         self._check_daily_reset(asset)
-        self._daily_pnl[asset] = self._daily_pnl.get(asset, 0.0) + pnl
+        self._daily_pnl[asset] = self._daily_pnl.get(asset, 0.0) + pnl_usd
 
     def is_paused(self, asset: str) -> bool:
         self._check_daily_reset(asset)
@@ -147,12 +149,15 @@ class EndWindowController:
         main_direction: str,
         direction: str,
     ) -> tuple[bool, str]:
-        """H3：主策略互斥检查"""
+        """
+        H3：主策略互斥检查。
+
+        同一窗口内最多只允许一个策略持仓：只要主策略在该窗口有持仓
+        （或已经交易过），末端策略都跳过，避免叠加仓位。
+        """
         if not main_has_position:
             return True, "ok"
-        if main_direction in ("UP", "DOWN") and main_direction != direction:
-            return False, "main_opposite_direction"
-        return True, "ok"
+        return False, "main_has_position"
 
     def check_entry(
         self,
@@ -218,7 +223,10 @@ class EndWindowController:
         动态止盈：入场价越高（赔率越差），TP 目标越高。
         """
         p = self._params
-        t = (entry_price - p.tp_entry_min) / (p.tp_entry_max - p.tp_entry_min)
+        span = p.tp_entry_max - p.tp_entry_min
+        if abs(span) < 1e-9:
+            return p.tp_max_pct
+        t = (entry_price - p.tp_entry_min) / span
         t = max(0.0, min(1.0, t))
         return p.tp_max_pct - (p.tp_max_pct - p.tp_min_pct) * t
 
@@ -231,15 +239,14 @@ class EndWindowController:
         """
         E2：方向反转止损。
 
-        对 UP 方向：current_price < entry_price × (1 - reversal_pct) → 止损
-        对 DOWN 方向：current_price > entry_price × (1 + reversal_pct) → 止损
+        entry_price / current_price 都是「所持有 token」的价格（UP 持仓用 UP
+        token，DOWN 持仓用 DOWN token）。无论方向如何，token 价格从入场价
+        下跌超过 reversal_stop_pct 即视为方向反转，立即止损。
         """
         p = self._params
-        if direction == "UP":
-            return current_price < entry_price * (1.0 - p.reversal_stop_pct)
-        if direction == "DOWN":
-            return current_price > entry_price * (1.0 + p.reversal_stop_pct)
-        return False
+        if direction not in ("UP", "DOWN"):
+            return False
+        return current_price < entry_price * (1.0 - p.reversal_stop_pct)
 
     def check_exit(
         self,

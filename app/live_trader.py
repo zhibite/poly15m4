@@ -1567,6 +1567,8 @@ class LiveTrader:
         self, w3, wallet: str, condition_id: str,
         up_token_id: str, down_token_id: str, neg_risk: bool,
     ) -> float:
+        from web3.contract import Contract
+        from app.polygon_usdc import POLYGON_PUSD as _PUSD, _erc20_balance_raw
 
         redeem_abi = {
             "name": "redeemPositions",

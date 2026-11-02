@@ -87,3 +87,10 @@ class OpenPosition:
     _last_pnl_usd: float = 0.0
     # 锚点价（用于部分止盈时的参考价）
     entry_anchor_deviation_pct: float = 0.0
+
+    # ── 移动止损 / 风控 ──────────────────────────────────────────────
+    # 持仓期间的最高 token 价格 / 最高浮盈百分比
+    peak_price: float = 0.0
+    peak_pnl_pct: float = 0.0
+    # 是否已把本笔盈亏上报给 RiskManager（避免重复计数）
+    _risk_recorded: bool = False

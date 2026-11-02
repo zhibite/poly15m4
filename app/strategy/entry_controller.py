@@ -1,17 +1,19 @@
 """
 entry_controller.py — 入场控制器（单单持仓版）
 
-规则（per trading-guide.md）：
-- 窗口开启后 T=3~7min 内入场（噪音期后、危险期前）
-- 超过 6 分钟 → 整个窗口期不开单
-- Core 5 指标同向才入场，< 3/5 必须跳过
-- 根据信号强度确定仓位（3/5 半仓，4/5 全仓，5/5 最大仓）
-- 无补仓：只入场一次，之后只做止盈止损/窗口结算
+规则：
+- 入场时间窗由 entry_early_start_elapsed_sec ~ entry_late_cutoff_elapsed_sec 控制
+  （默认 0~540s，超过截止时间整个窗口不再开单）
+- Core 6 指标同向共识 >= core_agree_threshold（默认 3）才入场
+- 根据共识数量确定仓位：3/6 半仓、4/6 全仓、5/6 1.5×、6/6 2×
+- Advanced 过滤要求 REDUCE 时仓位减半；SKIP 时禁止入场
+- 无补仓：同一窗口只入场一次，之后只做止盈止损/窗口结算
 """
 
 import asyncio
+import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -22,19 +24,16 @@ from app.pm_client import PolymarketClient, estimate_buy_slippage
 from app.strategy.end_window_signal import compute_liquidity_confidence
 from app.strategy.models import MarketInfo, OpenPosition
 from app.strategy.decision_logger import DecisionLogger
+from app.strategy.factor_model import FactorSnapshot, compute_factor_snapshot
 from app.strategy.window_context import WindowContext
 from app.strategy.position_state import PositionState
 from app.strategy.retry_manager import RetryManager
 from app.strategy.indicator_signal_service import (
+    FilterResult,
     IndicatorSignalService,
     SignalDir,
     SignalResult,
 )
-
-
-"""
-entry_controller.py — 入场控制器（单单持仓版）
-"""
 
 
 @dataclass
@@ -56,9 +55,44 @@ class EntryParams:
     # ── 信号驱动入场参数 ─────────────────────────────────────────────
     # Core 6 指标同向数量门槛（>= 此值才入场）
     core_agree_threshold: int = 3
+    # 与主方向相反的 Core 信号数量上限（超过则跳过）
+    core_contradict_limit: int = 1
     # 绝对价格区间（入场时 UP/DOWN 价格必须在此范围内）
     entry_price_min: float = 0.20
     entry_price_max: float = 0.60
+
+    # 是否要求信号方向与 CLOB 价格方向一致（可选的额外确认）
+    require_price_alignment: bool = False
+    price_alignment_min_dev: float = 0.02
+
+    # 按 Core 共识数量配置仓位倍数（相对 base_usdc）
+    stake_mult_core3: float = 0.5
+    stake_mult_core4: float = 1.0
+    stake_mult_core5: float = 1.5
+    stake_mult_core6: float = 2.0
+
+    # 可选：基于历史胜率的分数 Kelly 仓位
+    use_kelly_sizing: bool = False
+    kelly_fraction: float = 0.25
+    kelly_prior_weight: float = 20.0
+    kelly_min_samples: int = 20
+    kelly_max_mult: float = 2.0
+    bankroll_usdc: float = 100.0
+    hold_to_settlement: bool = False
+
+    # ── 因子模型 ──────────────────────────────────────────────────────
+    # 0 = off, 1 = shadow（只记录）, 2 = live（用因子做决策）
+    factor_mode: int = 0
+    factor_w_trend: float = 0.20
+    factor_w_reversion: float = 0.15
+    factor_w_price: float = 0.35
+    factor_w_micro: float = 0.15
+    factor_w_flow: float = 0.15
+    factor_min_net: float = 0.25
+    factor_min_agreement: float = 0.60
+    factor_rev_veto_score: float = 0.70
+    factor_max_spread_bps: float = 100.0
+    factor_oi_change_threshold: float = 0.02
 
     # ── 流动性过滤 ───────────────────────────────────────────────────
     min_depth_coverage: float = 2.0    # 盘口深度至少是投入的多少倍（默认 2x）
@@ -106,17 +140,29 @@ class EntryController:
         live_trader,
         logger: DecisionLogger,
         signal_svc: dict[str, "IndicatorSignalService"] | None = None,
+        risk_manager=None,
     ):
         self._pm = pm
         self._market_svc = market_svc
         self._live_trader = live_trader
         self._decision_logger = logger
+        self._risk_manager = risk_manager
 
         self._entry_locks: dict[str, asyncio.Lock] = {}
         self._opening_pos_by_asset: dict[str, bool] = {}
         self._retry_mgr = RetryManager(mode="entry")
         self._params = EntryParams()
         self._prev_live_mode: Optional[bool] = None
+
+        # 决策快照：每个 asset 每个 bar 只写一次；记录最近一条的 id 供入场回填
+        self._last_snapshot_bar: dict[str, int] = {}
+        self._last_snapshot_id: dict[str, int] = {}
+
+        # 历史胜率缓存：(core_agree, mode) -> (wins, total, ts)
+        self._winrate_cache: dict[tuple[int, str], tuple[int, int, float]] = {}
+
+        # 因子快照缓存：asset -> (cache_key, snapshot, up_orderbook)
+        self._factor_cache: dict[str, tuple[tuple, FactorSnapshot, dict | None]] = {}
 
         # 窗口入场标记：一旦某窗口超过截止时间仍未入场，整个窗口禁止开单
         self._window_skipped: dict[str, bool] = {}
@@ -148,10 +194,40 @@ class EntryController:
 
         # 信号驱动参数
         p.core_agree_threshold = int(float(cfg.get("core_agree_threshold", 3)))
+        p.core_contradict_limit = int(float(cfg.get("core_contradict_limit", 1)))
         p.entry_early_start_elapsed_sec = float(cfg.get("entry_early_start_elapsed_sec", 0.0))
         p.entry_late_cutoff_elapsed_sec = float(cfg.get("entry_late_cutoff_elapsed_sec", 540.0))
         p.entry_price_min = float(cfg.get("entry_price_min", 0.20))
         p.entry_price_max = float(cfg.get("entry_price_max", 0.60))
+
+        p.require_price_alignment = bool(cfg.get("entry_require_price_alignment", False))
+        p.price_alignment_min_dev = float(cfg.get("entry_price_alignment_min_dev", 0.02))
+
+        p.stake_mult_core3 = float(cfg.get("stake_mult_core3", 0.5))
+        p.stake_mult_core4 = float(cfg.get("stake_mult_core4", 1.0))
+        p.stake_mult_core5 = float(cfg.get("stake_mult_core5", 1.5))
+        p.stake_mult_core6 = float(cfg.get("stake_mult_core6", 2.0))
+
+        p.use_kelly_sizing = bool(cfg.get("use_kelly_sizing", False))
+        p.kelly_fraction = float(cfg.get("kelly_fraction", 0.25))
+        p.kelly_prior_weight = float(cfg.get("kelly_prior_weight", 20.0))
+        p.kelly_min_samples = int(float(cfg.get("kelly_min_samples", 20)))
+        p.kelly_max_mult = float(cfg.get("kelly_max_mult", 2.0))
+        p.bankroll_usdc = float(cfg.get("bankroll_usdc", 100.0))
+        p.hold_to_settlement = bool(cfg.get("exit_hold_to_settlement", False))
+
+        # 因子模型
+        p.factor_mode = int(float(cfg.get("factor_mode", 0)))
+        p.factor_w_trend = float(cfg.get("factor_w_trend", 0.20))
+        p.factor_w_reversion = float(cfg.get("factor_w_reversion", 0.15))
+        p.factor_w_price = float(cfg.get("factor_w_price", 0.35))
+        p.factor_w_micro = float(cfg.get("factor_w_micro", 0.15))
+        p.factor_w_flow = float(cfg.get("factor_w_flow", 0.15))
+        p.factor_min_net = float(cfg.get("factor_min_net", 0.25))
+        p.factor_min_agreement = float(cfg.get("factor_min_agreement", 0.60))
+        p.factor_rev_veto_score = float(cfg.get("factor_rev_veto_score", 0.70))
+        p.factor_max_spread_bps = float(cfg.get("factor_max_spread_bps", 100.0))
+        p.factor_oi_change_threshold = float(cfg.get("factor_oi_change_threshold", 0.02))
 
         # 流动性过滤参数
         p.min_depth_coverage = float(cfg.get("min_depth_coverage", 2.0))
@@ -159,7 +235,7 @@ class EntryController:
         p.obi_contradict_skip = float(cfg.get("obi_contradict_skip", 0.25))
 
         # 止盈止损阈值
-        p.tp_base_pct = float(cfg.get("tp_base_pct", 65.0))
+        p.tp_base_pct = float(cfg.get("tp_base_pct", 10.0))
         p.tp_range_pct = float(cfg.get("tp_range_pct", 20.0))
         p.entry_price_min_tp = float(cfg.get("entry_price_min_tp", 0.20))
         p.entry_price_max_tp = float(cfg.get("entry_price_max_tp", 0.60))
@@ -191,6 +267,18 @@ class EntryController:
 
     # ── 计算止盈止损阈值（per trading-guide.md）──────────────────────────
 
+    def _tp_pct_for_price(self, entry_price: float) -> float:
+        """根据入场价计算止盈阈值（%）。"""
+        p = self._params
+        price_range = p.entry_price_max_tp - p.entry_price_min_tp
+        if price_range > 1e-9:
+            clamped = max(p.entry_price_min_tp, min(p.entry_price_max_tp, entry_price))
+            scale = (p.entry_price_max_tp - clamped) / price_range
+            tp_pct = p.tp_base_pct + p.tp_range_pct * scale
+        else:
+            tp_pct = p.tp_base_pct
+        return max(tp_pct, 0.0)
+
     def _calc_stop_levels(self, entry_price: float, pos: OpenPosition) -> None:
         """
         根据入场价计算止盈止损阈值，写入 pos。
@@ -201,20 +289,9 @@ class EntryController:
 
         止损阈值（sl_pct）：固定值 sl_base_pct
           亏损达到 sl_base_pct 时进入信号确认检查（见 exit_controller）
-
-        不含追踪止损逻辑：TP 触发时检查信号同向性，同向则继续持有，否则止盈退出。
         """
         p = self._params
-        price_range = p.entry_price_max_tp - p.entry_price_min_tp
-        if price_range > 1e-9:
-            clamped = max(p.entry_price_min_tp, min(p.entry_price_max_tp, entry_price))
-            scale = (p.entry_price_max_tp - clamped) / price_range
-            tp_pct = p.tp_base_pct + p.tp_range_pct * scale
-        else:
-            tp_pct = p.tp_base_pct
-        tp_pct = max(tp_pct, 0.0)
-
-        pos.tp_pct = tp_pct
+        pos.tp_pct = self._tp_pct_for_price(entry_price)
         pos.sl_pct = p.sl_base_pct
         # 锚点价：入场时等于有效入场价，用于 PnL 百分比的基准计算
         pos.anchor_price = entry_price
@@ -269,6 +346,16 @@ class EntryController:
         if ctx.position is not None:
             return EntryResult(reason="position_exists")
 
+        # 单单持仓：同一窗口只允许开仓一次（平仓后也不允许再次入场）
+        if ctx.is_traded:
+            return EntryResult(reason="already_traded")
+
+        # 账户级风控：每日亏损上限 / 连续亏损冷却
+        if self._risk_manager is not None:
+            allowed, risk_reason = self._risk_manager.can_enter()
+            if not allowed:
+                return EntryResult(reason=f"risk:{risk_reason}")
+
         up_mid = mkt._up_mid
         down_mid = mkt._down_mid
 
@@ -307,9 +394,27 @@ class EntryController:
         )
 
         mode_label = "LIVE" if p.live_mode else "DRY"
+
+        factor_snap: FactorSnapshot | None = None
+        factor_up_book: dict | None = None
+        if p.factor_mode > 0:
+            factor_snap, factor_up_book = await self._get_factor_snapshot(
+                asset, ctx, sig,
+            )
+
+        await self._record_decision_snapshot(
+            asset, ctx, sig, elapsed, up_mid, down_mid, factors=factor_snap,
+        )
+
+        # factor_mode=2：用因子分数替代 Core 共识做决策
+        if p.factor_mode == 2:
+            return await self._check_factor_entry(
+                asset, ctx, sig, factor_snap, factor_up_book, elapsed,
+            )
+
         logger.info(
-            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/6 direction={} price={:.4f} action={}",
-            mode_label, asset, elapsed, sig.core_agree,
+            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/6 contradict={} direction={} price={:.4f} action={}",
+            mode_label, asset, elapsed, sig.core_agree, sig.core_contradict,
             sig.direction_label,
             sig.up_mid if sig.direction == SignalDir.UP else sig.down_mid,
             sig.suggested_action,
@@ -322,10 +427,17 @@ class EntryController:
 
         if sig.core_agree < p.core_agree_threshold:
             logger.info(
-                "check_entry [{}] SKIP: Core 共识 {}/6 < {}/6（不足）",
+                "check_entry [{}] SKIP: Core 同向共识 {}/6 < {}/6（不足）",
                 asset, sig.core_agree, p.core_agree_threshold,
             )
             return EntryResult(reason="no_signal", signal_result=sig)
+
+        if sig.core_contradict > p.core_contradict_limit:
+            logger.info(
+                "check_entry [{}] SKIP: Core 反向信号 {}/6 > 上限 {}（方向分歧过大）",
+                asset, sig.core_contradict, p.core_contradict_limit,
+            )
+            return EntryResult(reason="core_contradiction", signal_result=sig)
 
         # ── Step 3: 确定方向和边 ────────────────────────────────────────────
         if sig.direction == SignalDir.UP:
@@ -353,39 +465,75 @@ class EntryController:
             )
             return EntryResult(reason="no_signal", signal_result=sig)
 
+        # ── Step 4a: 可选的 CLOB 价格方向确认 ──────────────────────────
+        # 只有当市场本身也偏向同一方向时才入场，过滤“指标看多但市场看空”的逆势单。
+        if p.require_price_alignment:
+            up_implied = mkt._up_mid
+            aligned = (
+                (direction == "UP" and up_implied >= 0.5 + p.price_alignment_min_dev)
+                or (direction == "DOWN" and up_implied <= 0.5 - p.price_alignment_min_dev)
+            )
+            if not aligned:
+                logger.info(
+                    "check_entry [{}] SKIP: {} 信号与 CLOB 方向不一致 (up_mid={:.4f}, min_dev={:.3f})",
+                    asset, direction, up_implied, p.price_alignment_min_dev,
+                )
+                return EntryResult(reason="price_alignment", signal_result=sig)
+
         # ── Step 4b: OBI 方向过滤 ──────────────────────────────────────
-        obi_logged = False
         book = await self._pm.get_orderbook(
             mkt.token_up_id if side == Side.UP else mkt.token_down_id
         )
         if book:
-            D5, obi, depth_factor, depth_ok = compute_liquidity_confidence(
+            _D5, obi, _depth_factor, _depth_ok = compute_liquidity_confidence(
                 book, direction,
             )
-            obi_logged = True
-            if direction == "UP" and obi < -abs(p.obi_contradict_skip):
+            # book 是所买 token（UP 或 DOWN）的盘口：
+            # 卖方主导（OBI < -threshold）与持仓方向矛盾，跳过；买方主导是支持信号。
+            if obi < -abs(p.obi_contradict_skip):
                 logger.info(
-                    "check_entry [{}] SKIP: {} OBI={:+.2f}（卖方主导，与 UP 矛盾）",
-                    asset, direction, obi,
-                )
-                return EntryResult(reason="obi_contradict", signal_result=sig)
-            if direction == "DOWN" and obi > abs(p.obi_contradict_skip):
-                logger.info(
-                    "check_entry [{}] SKIP: {} OBI={:+.2f}（买方主导，与 DOWN 矛盾）",
-                    asset, direction, obi,
+                    "check_entry [{}] SKIP: {} OBI={:+.2f}（卖方主导，与 {} 方向矛盾）",
+                    asset, direction, obi, direction,
                 )
                 return EntryResult(reason="obi_contradict", signal_result=sig)
 
         # ── Step 5: 确定仓位（按 Core 6 共识数量，基准 4U）─────────────────
         # 6/6 → 8U（2×），5/6 → 6U（1.5×），4/6 → 4U（1×），3/6 → 2U（0.5×）
         if sig.core_agree >= 6:
-            stake = p.base_usdc * 2.0   # 8U
+            stake = p.base_usdc * p.stake_mult_core6
         elif sig.core_agree >= 5:
-            stake = p.base_usdc * 1.5   # 6U
+            stake = p.base_usdc * p.stake_mult_core5
         elif sig.core_agree >= 4:
-            stake = p.base_usdc * 1.0   # 4U
+            stake = p.base_usdc * p.stake_mult_core4
         else:
-            stake = p.base_usdc * 0.5   # 2U
+            stake = p.base_usdc * p.stake_mult_core3
+
+        # 可选：用历史胜率 + Kelly 覆盖固定倍数仓位
+        if p.use_kelly_sizing:
+            kelly_stake = await self._kelly_stake(sig.core_agree, price)
+            if kelly_stake is not None:
+                if kelly_stake <= 0:
+                    logger.info(
+                        "check_entry [{}] SKIP: Kelly 无正 edge (core={}/6, price={:.4f})",
+                        asset, sig.core_agree, price,
+                    )
+                    return EntryResult(reason="kelly_no_edge", signal_result=sig)
+                stake = kelly_stake
+                logger.info(
+                    "check_entry [{}] KELLY stake={:.2f}u (core={}/6, price={:.4f})",
+                    asset, stake, sig.core_agree, price,
+                )
+
+        # Advanced 过滤要求减仓（Funding 极端反向 / OBI 反向）→ 仓位减半
+        if sig.advanced.filter_result == FilterResult.REDUCE:
+            stake *= 0.5
+            logger.info(
+                "check_entry [{}] REDUCE: {} — stake halved to {:.1f}u",
+                asset,
+                sig.advanced.reduce_reason or "advanced filter",
+                stake,
+            )
+
         if stake < 1.0:
             logger.info(
                 "check_entry [{}] SKIP: stake={:.4f} < min $1",
@@ -401,6 +549,7 @@ class EntryController:
         # ── Step 6: 序列化信号供日志记录 ───────────────────────────────
         ctx.entry_signal_meta = {
             "core_agree": sig.core_agree,
+            "core_contradict": sig.core_contradict,
             "strength": sig.strength,
             "strength_label": sig.strength_label,
             "direction": sig.direction.value,
@@ -444,6 +593,420 @@ class EntryController:
             finally:
                 self._opening_pos_by_asset[asset] = False
 
+    # ── 基于历史胜率的分数 Kelly 仓位（可选）───────────────────────────
+
+    async def _historical_win_stats(self, core_agree: int) -> tuple[int, int]:
+        """返回该 Core 共识桶的历史 (wins, total)；5 分钟缓存。"""
+        now_ts = datetime.now(timezone.utc).timestamp()
+        mode = "live" if self._params.live_mode else "dry"
+        cache_key = (int(core_agree), mode)
+        cached = self._winrate_cache.get(cache_key)
+        if cached and now_ts - cached[2] < 300:
+            return cached[0], cached[1]
+        try:
+            from sqlalchemy import case, func, select
+
+            from app.database import async_session
+            from app.models import Trade
+
+            cutoff = datetime.now(timezone.utc) - timedelta(days=180)
+            async with async_session() as db:
+                row = await db.execute(
+                    select(
+                        func.count(Trade.id),
+                        func.coalesce(
+                            func.sum(case((Trade.pnl_usd > 0, 1), else_=0)), 0,
+                        ),
+                    ).where(
+                        Trade.strategy == "main",
+                        Trade.mode == ("live" if self._params.live_mode else "dry"),
+                        Trade.entry_core_agree == int(core_agree),
+                        Trade.closed_at >= cutoff,
+                    )
+                )
+                total, wins = row.one()
+            wins_i = int(wins or 0)
+            total_i = int(total or 0)
+            self._winrate_cache[cache_key] = (wins_i, total_i, now_ts)
+            return wins_i, total_i
+        except Exception as exc:
+            logger.debug("historical win stats failed: {}", exc)
+            return 0, 0
+
+    async def _kelly_stake(self, core_agree: int, price: float) -> Optional[float]:
+        """
+        用历史胜率 + 市场隐含概率先验计算分数 Kelly 仓位。
+
+        返回 None  = 样本不足，调用方回退到 Core 倍数仓位
+        返回 0.0   = 历史数据没有正 edge，调用方跳过
+        返回 >0    = 建议仓位（USDC）
+        """
+        p = self._params
+        if not p.use_kelly_sizing or price <= 0 or price >= 1:
+            return None
+
+        wins, total = await self._historical_win_stats(core_agree)
+        if total < p.kelly_min_samples:
+            return None
+
+        # 以市场隐含概率为先验做收缩，避免小样本极端胜率
+        prior = max(0.01, min(0.99, float(price)))
+        p_est = (wins + p.kelly_prior_weight * prior) / (
+            total + p.kelly_prior_weight
+        )
+
+        # 赔率 b：win 时收益 / loss 时亏损
+        if p.hold_to_settlement:
+            b = (1.0 - price) / price
+        else:
+            tp = self._tp_pct_for_price(price)
+            loss_pct = abs(p.sl_base_pct)
+            b = tp / loss_pct if loss_pct > 0 else 0.0
+        if b <= 0:
+            return None
+
+        kelly = (p_est * (b + 1.0) - 1.0) / b
+        if kelly <= 0:
+            return 0.0
+
+        stake = p.bankroll_usdc * p.kelly_fraction * kelly
+        max_stake = p.base_usdc * p.kelly_max_mult
+        return max(0.0, min(stake, max_stake))
+
+    # ── 因子模型 ──────────────────────────────────────────────────────
+
+    def latest_factor_snapshot(self, asset: str) -> dict | None:
+        cached = self._factor_cache.get(asset)
+        return cached[1].to_dict() if cached else None
+
+    async def _get_factor_snapshot(
+        self,
+        asset: str,
+        ctx: WindowContext,
+        sig: SignalResult,
+    ) -> tuple[FactorSnapshot | None, dict | None]:
+        """按 bar 缓存因子快照；返回 (snapshot, UP token orderbook)。"""
+        p = self._params
+        if p.factor_mode <= 0:
+            return None, None
+
+        mkt = ctx.market
+        if mkt is None:
+            return None, None
+
+        bar_ts = int(
+            sig.bar_ts
+            or (int(datetime.now(timezone.utc).timestamp()) // 60 * 60)
+        )
+        cache_key = (bar_ts, ctx.condition_id)
+        cached = self._factor_cache.get(asset)
+        if cached and cached[0] == cache_key:
+            return cached[1], cached[2]
+
+        # 因子模型统一使用 UP token 盘口：OBI 正数代表看 UP
+        up_book = await self._pm.get_orderbook(mkt.token_up_id)
+        weights = {
+            "trend": p.factor_w_trend,
+            "reversion": p.factor_w_reversion,
+            "price": p.factor_w_price,
+            "micro": p.factor_w_micro,
+            "flow": p.factor_w_flow,
+        }
+        snapshot = compute_factor_snapshot(
+            sig.raw_metrics or {},
+            up_samples=list(getattr(ctx, "up_samples", []) or []),
+            window_open_up=float(getattr(mkt, "window_open_up", 0.5) or 0.5),
+            current_up=float(getattr(mkt, "_up_mid", 0.5) or 0.5),
+            up_orderbook=up_book,
+            weights=weights,
+            max_spread_bps=p.factor_max_spread_bps,
+            oi_change_threshold=p.factor_oi_change_threshold,
+        )
+        self._factor_cache[asset] = (cache_key, snapshot, up_book)
+        return snapshot, up_book
+
+    async def _check_factor_entry(
+        self,
+        asset: str,
+        ctx: WindowContext,
+        sig: SignalResult,
+        factor_snap: FactorSnapshot | None,
+        up_book: dict | None,
+        elapsed: float,
+    ) -> EntryResult:
+        """factor_mode=2 时用因子分数替代 Core 共识做入场决策。"""
+        mkt = ctx.market
+        p = self._params
+        if mkt is None or factor_snap is None:
+            return EntryResult(reason="factor_unavailable", signal_result=sig)
+
+        # 保留现有 Advanced 的硬否决（CVD 反向背离），因子模式不覆盖该安全条件
+        if sig.advanced.filter_result == FilterResult.SKIP:
+            logger.info(
+                "FACTOR SKIP [{}] advanced_hard_skip: {}",
+                asset, sig.advanced.skip_reason or "advanced filter",
+            )
+            return EntryResult(
+                reason="advanced_hard_skip", signal_result=sig,
+            )
+
+        ok, reason = factor_snap.entry_ok(
+            min_net=p.factor_min_net,
+            min_agreement=p.factor_min_agreement,
+            rev_veto_score=p.factor_rev_veto_score,
+        )
+        if not ok:
+            logger.info(
+                "FACTOR SKIP [{}] {} net={:+.2f} agree={:.2f} reason={}",
+                asset, factor_snap.direction, factor_snap.net_score,
+                factor_snap.agreement, reason,
+            )
+            return EntryResult(reason=reason, signal_result=sig)
+
+        direction = factor_snap.direction
+        side = Side.UP if direction == "UP" else Side.DOWN
+        price = mkt._up_mid if side == Side.UP else mkt._down_mid
+
+        if price < p.entry_price_min or price > p.entry_price_max:
+            logger.info(
+                "FACTOR SKIP [{}] {} price={:.4f} outside [{:.2f}, {:.2f}]",
+                asset, direction, price, p.entry_price_min, p.entry_price_max,
+            )
+            return EntryResult(reason="price_range", signal_result=sig)
+
+        if p.require_price_alignment:
+            up_implied = mkt._up_mid
+            aligned = (
+                (direction == "UP" and up_implied >= 0.5 + p.price_alignment_min_dev)
+                or (direction == "DOWN" and up_implied <= 0.5 - p.price_alignment_min_dev)
+            )
+            if not aligned:
+                logger.info(
+                    "FACTOR SKIP [{}] {} 与 CLOB 方向不一致 (up_mid={:.4f})",
+                    asset, direction, up_implied,
+                )
+                return EntryResult(reason="price_alignment", signal_result=sig)
+
+        # 所买 token 的盘口（因子模型里的 up_book 可复用）
+        if side == Side.UP:
+            book = up_book or await self._pm.get_orderbook(mkt.token_up_id)
+        else:
+            book = await self._pm.get_orderbook(mkt.token_down_id)
+
+        if book:
+            _D5, obi, _depth_factor, _depth_ok = compute_liquidity_confidence(
+                book, direction,
+            )
+            if obi < -abs(p.obi_contradict_skip):
+                logger.info(
+                    "FACTOR SKIP [{}] {} OBI={:+.2f}（卖方主导，与方向矛盾）",
+                    asset, direction, obi,
+                )
+                return EntryResult(reason="obi_contradict", signal_result=sig)
+
+        # 因子强度 → 仓位倍数
+        strength = abs(factor_snap.net_score) * factor_snap.agreement
+        mult = max(0.5, min(2.0, 0.5 + 1.5 * strength))
+        stake = p.base_usdc * mult
+
+        # Advanced REDUCE（Funding 极端等）仍作为保守减仓条件
+        if sig.advanced.filter_result == FilterResult.REDUCE:
+            stake *= 0.5
+            logger.info(
+                "FACTOR REDUCE [{}] {} — stake halved to {:.2f}u",
+                asset, sig.advanced.reduce_reason or "advanced filter", stake,
+            )
+
+        if stake < 1.0:
+            logger.info(
+                "FACTOR SKIP [{}] stake={:.4f} < min $1", asset, stake,
+            )
+            return EntryResult(reason="stake_too_small", signal_result=sig)
+
+        logger.info(
+            "FACTOR READY [{}][{}] {} @ {:.4f} net={:+.2f} agree={:.2f} "
+            "stake={:.1f}u trend={:+.2f} rev={:+.2f} price={:+.2f} micro={:+.2f} flow={:+.2f}",
+            "LIVE" if p.live_mode else "DRY", asset, direction, price,
+            factor_snap.net_score, factor_snap.agreement, stake,
+            factor_snap.trend.score, factor_snap.reversion.score,
+            factor_snap.price.score, factor_snap.micro.score,
+            factor_snap.flow.score,
+        )
+
+        ctx.entry_signal_meta = {
+            "core_agree": sig.core_agree,
+            "core_contradict": sig.core_contradict,
+            "strength": sig.strength,
+            "strength_label": sig.strength_label,
+            "direction": direction,
+            "direction_label": (
+                "做 UP（看涨）" if direction == "UP" else "做 DOWN（看跌）"
+            ),
+            "anchor_deviation_pct": round(sig.anchor_deviation_pct, 6),
+            "advanced_filter": sig.advanced.filter_result.value,
+            "advanced_note": (
+                sig.advanced.skip_reason
+                or sig.advanced.reduce_reason
+                or sig.advanced.confirm_note
+                or ""
+            ),
+            "rsi": sig.raw_rsi,
+            "funding": sig.raw_funding,
+            "window_remaining_sec": round(sig.window_end_sec, 1),
+            "skip_reason": "",
+            "factor_mode": "live",
+            "factor_net": round(factor_snap.net_score, 4),
+            "factor_agreement": round(factor_snap.agreement, 4),
+            "factor_conflict": round(factor_snap.conflict, 4),
+            "factor_direction": direction,
+            "factors": factor_snap.to_dict(),
+        }
+
+        async with self.ensure_lock(asset):
+            if ctx.position is not None:
+                return EntryResult(reason="position_exists")
+            self._opening_pos_by_asset[asset] = True
+            try:
+                success = await self._do_entry(
+                    asset, ctx, side, direction, price, stake, elapsed,
+                    orderbook=book,
+                )
+                if success:
+                    return EntryResult(
+                        triggered=True,
+                        side=side,
+                        direction=direction,
+                        price=price,
+                        stake=stake,
+                        signal_result=sig,
+                    )
+                return EntryResult(reason="order_failed", signal_result=sig)
+            finally:
+                self._opening_pos_by_asset[asset] = False
+
+    # ── 决策快照 ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _signal_to_dict(s) -> dict:
+        return {
+            "name": s.name,
+            "direction": s.direction.value,
+            "agree": bool(s.agree),
+            "reason": s.reason,
+            "raw": s.raw_value,
+        }
+
+    async def _record_decision_snapshot(
+        self,
+        asset: str,
+        ctx: WindowContext,
+        sig: SignalResult,
+        elapsed: float,
+        up_mid: float,
+        down_mid: float,
+        *,
+        factors: FactorSnapshot | None = None,
+    ) -> None:
+        """每个 asset 每根 bar 写一条完整决策快照，供后续信号有效性分析。"""
+        try:
+            bar_key = int(
+                sig.bar_ts
+                or (int(datetime.now(timezone.utc).timestamp()) // 60 * 60)
+            )
+            if self._last_snapshot_bar.get(asset) == bar_key:
+                return
+
+            from app.database import async_session
+            from app.models import DecisionSnapshot
+
+            direction = sig.direction.value
+            decision_price = (
+                up_mid if direction == "UP"
+                else down_mid if direction == "DOWN"
+                else 0.0
+            )
+            core = {
+                "rsi": self._signal_to_dict(sig.core.rsi),
+                "macd": self._signal_to_dict(sig.core.macd),
+                "vwap": self._signal_to_dict(sig.core.vwap),
+                "ema": self._signal_to_dict(sig.core.ema),
+                "pivot": self._signal_to_dict(sig.core.pivot),
+                "bbands": self._signal_to_dict(sig.core.bbands),
+            }
+            advanced = {
+                "funding": self._signal_to_dict(sig.advanced.funding),
+                "cvd": self._signal_to_dict(sig.advanced.cvd),
+                "liquidation": self._signal_to_dict(sig.advanced.liquidation),
+                "obi": self._signal_to_dict(sig.advanced.obi),
+                "oi": self._signal_to_dict(sig.advanced.oi),
+                "filter_result": sig.advanced.filter_result.value,
+                "skip_reason": sig.advanced.skip_reason,
+                "reduce_reason": sig.advanced.reduce_reason,
+                "confirm_note": sig.advanced.confirm_note,
+            }
+
+            snapshot = DecisionSnapshot(
+                asset=asset,
+                condition_id=ctx.condition_id,
+                bar_ts=bar_key,
+                window_start=ctx.window_start,
+                elapsed_sec=float(elapsed),
+                mode="live" if self._params.live_mode else "dry",
+                up_mid=float(up_mid),
+                down_mid=float(down_mid),
+                decision_price=float(decision_price),
+                direction=direction,
+                core_agree=int(sig.core_agree),
+                core_contradict=int(sig.core_contradict),
+                strength=int(sig.strength),
+                advanced_filter=sig.advanced.filter_result.value,
+                suggested_action=sig.suggested_action,
+                skip_reason=sig.skip_reason or "",
+                core_json=json.dumps(core, ensure_ascii=False),
+                advanced_json=json.dumps(advanced, ensure_ascii=False),
+                factor_mode=int(self._params.factor_mode),
+                factor_net=float(factors.net_score) if factors else 0.0,
+                factor_agreement=float(factors.agreement) if factors else 0.0,
+                factor_conflict=float(factors.conflict) if factors else 0.0,
+                factor_direction=factors.direction if factors else "NONE",
+                factors_json=(
+                    json.dumps(factors.to_dict(), ensure_ascii=False)
+                    if factors else ""
+                ),
+                entered=0,
+            )
+            async with async_session() as db:
+                db.add(snapshot)
+                await db.commit()
+                await db.refresh(snapshot)
+                self._last_snapshot_id[asset] = snapshot.id
+                self._last_snapshot_bar[asset] = bar_key
+        except Exception as exc:
+            # 分析数据不能影响交易主流程
+            logger.debug("decision snapshot failed for {}: {}", asset, exc)
+
+    async def _mark_snapshot_entered(
+        self, asset: str, entry_record_id: int | None,
+    ) -> None:
+        snapshot_id = self._last_snapshot_id.get(asset)
+        if not snapshot_id:
+            return
+        try:
+            from sqlalchemy import update
+
+            from app.database import async_session
+            from app.models import DecisionSnapshot
+
+            async with async_session() as db:
+                await db.execute(
+                    update(DecisionSnapshot)
+                    .where(DecisionSnapshot.id == snapshot_id)
+                    .values(entered=1, entry_record_id=entry_record_id)
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.debug("decision snapshot update failed for {}: {}", asset, exc)
+
     # ── FOK 重试 ───────────────────────────────────────────────────────
 
     async def fire_entry_retries(self, assets_with_ctx: dict[str, WindowContext]) -> None:
@@ -474,22 +1037,46 @@ class EntryController:
     ) -> bool:
         """实际执行入场（live 或 dry）"""
         mkt = ctx.market
+        if mkt is None:
+            logger.error("ENTRY [{}] skipped: no market info", asset)
+            return False
         p = self._params
         slip = p.btc_slippage_pct if asset == "BTC" else p.eth_slippage_pct
         fee_rate_bps = p.default_fee_bps
+        token_id = mkt.token_up_id if side == Side.UP else mkt.token_down_id
 
         try:
-            token_id = mkt.token_up_id if side == Side.UP else mkt.token_down_id
             fee_rate_bps = await self._pm.get_fee_rate_bps(token_id)
         except Exception:
             logger.warning("fee_rate_bps unavailable — using default {} bps", fee_rate_bps)
 
-        if p.live_mode and self._live_trader:
+        # 实盘模式必须真的有 LiveTrader；否则绝不能静默降级为 dry 模拟，
+        # 否则 UI 显示 live_mode=True 但实际只记录了模拟成交。
+        if p.live_mode and self._live_trader is None:
+            logger.error(
+                "ENTRY [{}] live_mode=True but LiveTrader is unavailable — skipping entry "
+                "(check wallet/API credentials)",
+                asset,
+            )
+            return False
+
+        if p.live_mode:
             # 用盘口估算动态滑点，超限则跳过
             if orderbook:
-                slip_est = await estimate_buy_slippage(token_id, stake, pm_client=self._pm)
+                slip_est = await estimate_buy_slippage(
+                    token_id, stake, pm_client=self._pm,
+                    min_coverage=p.min_depth_coverage,
+                )
                 if not slip_est.error:
                     slip = max(slip_est.slippage_pct, 0.5)
+                    if not slip_est.sufficient:
+                        logger.info(
+                            "ENTRY skip [{}] {} depth coverage={:.1f}x < {:.1f}x "
+                            "(available={:.1f} tokens, stake={:.1f}U)",
+                            asset, direction, slip_est.pct_of_depth,
+                            p.min_depth_coverage, slip_est.depth_at_fill, stake,
+                        )
+                        return False
                     if slip > p.max_slippage_pct:
                         logger.info(
                             "ENTRY skip [{}] {} slip_est={:.2f}% > max={:.1f}%",
@@ -601,6 +1188,10 @@ class EntryController:
         )
 
     async def _fire_retry(self, asset: str, ctx: WindowContext, item) -> None:
+        if self._live_trader is None:
+            logger.warning("ENTRY retry [{}] skipped: LiveTrader unavailable", asset)
+            await self._retry_mgr.clear(asset)
+            return
         stake = item.stake
         direction = item.direction
         price = item.price
@@ -685,6 +1276,8 @@ class EntryController:
         # 计算止盈止损阈值（直接写入 pos）
         # 用 effective_entry_price（含手续费影响）作为 TP 计算基准，最接近实际盈亏
         self._calc_stop_levels(fp, pos)
+        pos.peak_price = fp
+        pos.peak_pnl_pct = 0.0
 
         sig_meta = getattr(ctx, "entry_signal_meta", None) or {}
         pos.entry_core_agree = int(sig_meta.get("core_agree", 0))
@@ -703,6 +1296,8 @@ class EntryController:
                 mode.upper(), asset, direction,
             )
             return
+
+        await self._mark_snapshot_entered(asset, pos.entry_record_id)
 
         if self._live_trader:
             self._live_trader.invalidate_token_balance_cache(

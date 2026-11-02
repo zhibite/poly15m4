@@ -415,14 +415,15 @@ class SlippageEstimate:
 
     fill_price  基于盘口档位估算的实际成交价
     slippage_pct  滑点百分比（相对决策价的百分比）
-    pct_of_depth  投入占盘口深度的比例（>100% = 超出流动性）
-    sufficient  盘口深度是否足够（可用档位至少覆盖 min_coverage × stake）
+    pct_of_depth  盘口可用深度 / 本次投入的覆盖倍数
+                  （买入按 USDC、卖出按 token 计；<1 表示深度不足以完全成交）
+    sufficient  盘口深度是否至少覆盖 min_coverage × 本次投入
     """
     fill_price: float       # 估算成交价
     slippage_pct: float     # 滑点（%，正数 = 对买方不利）
-    pct_of_depth: float      # 投入占深度比例
-    sufficient: bool        # 深度是否足够
-    depth_at_fill: float    # 成交位置的深度（可用 token 数）
+    pct_of_depth: float      # 深度覆盖倍数（available_depth / requested）
+    sufficient: bool        # 深度是否足够（coverage >= min_coverage）
+    depth_at_fill: float    # 盘口可用 token 总数
     levels_used: int        # 消耗的档位数
     error: str = ""         # 估算失败原因
 
@@ -462,16 +463,30 @@ async def estimate_buy_slippage(
 
     # 解析 asks: [{"price": "0.46", "size": "150"}, ...]
     # size 是 token 数量（概率单位），不是美元
+    parsed: list[tuple[float, float]] = []
+    for level in asks:
+        price = float(level.get("price", 0))
+        size = float(level.get("size", 0))
+        if price > 0 and size > 0:
+            parsed.append((price, size))
+
+    if not parsed:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="empty_book",
+        )
+
+    # 盘口总深度（用于计算覆盖倍数，而不是只看本次成交消耗）
+    total_ask_tokens = sum(size for _, size in parsed)
+    total_ask_usdc = sum(price * size for price, size in parsed)
+
     filled_cost = 0.0
     filled_tokens = 0.0
     levels_used = 0
 
-    for level in asks:
-        price = float(level.get("price", 0))
-        size = float(level.get("size", 0))
-        if price <= 0 or size <= 0:
-            continue
-
+    for price, size in parsed:
         level_cost = price * size
         if filled_cost + level_cost <= stake_usdc:
             filled_cost += level_cost
@@ -489,17 +504,18 @@ async def estimate_buy_slippage(
         return SlippageEstimate(
             fill_price=0.5, slippage_pct=0.0,
             pct_of_depth=0.0, sufficient=False,
-            depth_at_fill=0.0, levels_used=levels_used,
+            depth_at_fill=total_ask_tokens, levels_used=levels_used,
             error="empty_book",
         )
 
     fill_price = filled_cost / filled_tokens
 
     # 滑点 = 相对最佳卖价的损耗（%）
-    best_ask = float(asks[0].get("price", 0)) if asks else fill_price
+    best_ask = parsed[0][0]
     slippage_pct = abs(fill_price - best_ask) / best_ask * 100.0 if best_ask > 1e-9 else 0.0
 
-    pct_of_depth = filled_cost / stake_usdc if stake_usdc > 0 else 0
+    # 覆盖倍数：可用深度 / 本次投入。>= min_coverage 才算深度充足。
+    pct_of_depth = total_ask_usdc / stake_usdc if stake_usdc > 0 else 0.0
     sufficient = pct_of_depth >= min_coverage
 
     return SlippageEstimate(
@@ -507,7 +523,7 @@ async def estimate_buy_slippage(
         slippage_pct=slippage_pct,
         pct_of_depth=pct_of_depth,
         sufficient=sufficient,
-        depth_at_fill=filled_tokens,
+        depth_at_fill=total_ask_tokens,
         levels_used=levels_used,
     )
 
@@ -543,17 +559,32 @@ async def estimate_sell_slippage(
             error="no_bids",
         )
 
+    parsed: list[tuple[float, float]] = []
+    for level in bids:
+        price = float(level.get("price", 0))
+        size = float(level.get("size", 0))
+        if price > 0 and size > 0:
+            parsed.append((price, size))
+
+    if not parsed:
+        return SlippageEstimate(
+            fill_price=0.5, slippage_pct=0.0,
+            pct_of_depth=0.0, sufficient=False,
+            depth_at_fill=0.0, levels_used=0,
+            error="empty_book",
+        )
+
+    # 盘口总买盘深度（token 数）
+    total_bid_tokens = sum(size for _, size in parsed)
+
     filled_cost = 0.0
     filled_tokens = 0.0
     levels_used = 0
 
-    for level in bids:
-        price = float(level.get("price", 0))
-        size = float(level.get("size", 0))
-        if price <= 0 or size <= 0:
-            continue
-
+    for price, size in parsed:
         consume = min(size, tokens - filled_tokens)
+        if consume <= 0:
+            break
         filled_cost += price * consume
         filled_tokens += consume
         levels_used += 1
@@ -565,17 +596,18 @@ async def estimate_sell_slippage(
         return SlippageEstimate(
             fill_price=0.5, slippage_pct=0.0,
             pct_of_depth=0.0, sufficient=False,
-            depth_at_fill=0.0, levels_used=0,
+            depth_at_fill=total_bid_tokens, levels_used=0,
             error="empty_book",
         )
 
     fill_price = filled_cost / filled_tokens
 
     # 滑点 = 相对最佳买价的损耗（%）
-    best_bid = float(bids[0].get("price", 0)) if bids else fill_price
+    best_bid = parsed[0][0]
     slippage_pct = abs(best_bid - fill_price) / best_bid * 100.0 if best_bid > 1e-9 else 0.0
 
-    pct_of_depth = filled_tokens / tokens if tokens > 0 else 0
+    # 覆盖倍数：可用买盘 token 数 / 本次卖出 token 数
+    pct_of_depth = total_bid_tokens / tokens if tokens > 0 else 0.0
     sufficient = pct_of_depth >= min_coverage
 
     return SlippageEstimate(
@@ -583,6 +615,6 @@ async def estimate_sell_slippage(
         slippage_pct=slippage_pct,
         pct_of_depth=pct_of_depth,
         sufficient=sufficient,
-        depth_at_fill=filled_tokens,
+        depth_at_fill=total_bid_tokens,
         levels_used=levels_used,
     )

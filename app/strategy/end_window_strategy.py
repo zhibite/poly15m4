@@ -19,6 +19,7 @@ from loguru import logger
 from app.models import Side
 from app.strategy.end_window_signal import EndWindowConfidence, compute_confidence, determine_direction
 from app.strategy.end_window_controller import EndWindowController, EndWindowExitSignal
+from app.strategy.models import MarketInfo
 from app.strategy.window_context import WindowContext
 from app.pm_client import PolymarketClient
 
@@ -67,7 +68,9 @@ class EndPosition:
     anchor_price: float = 0.0
     tp_hit: Optional[dict] = None
     entry_anchor_deviation_pct: float = 0.0
-    market = None  # MarketInfo reference
+    # 注意：必须有类型注解，否则 dataclass 不会把它当作字段，
+    # 构造时传入 market=... 会抛 TypeError。
+    market: Optional[MarketInfo] = None
 
 
 class EndWindowStrategy:
@@ -91,6 +94,8 @@ class EndWindowStrategy:
         self._pm = pm                          # PolymarketClient (for orderbook)
         self._positions: dict[str, EndPosition] = {}
         self._entry_confidences: dict[str, EndWindowConfidence] = {}
+        # 同一窗口只允许入场一次（平仓后也不再入场），值为 condition_id
+        self._traded_conditions: dict[str, str] = {}
         self._live_trader = None             # 每次 tick 由 run_forever 传入
 
     # ── 参数同步 ─────────────────────────────────────────────────────────────
@@ -110,6 +115,7 @@ class EndWindowStrategy:
         live_trader=None,
         *,
         market_duration_sec: float = 900.0,
+        allow_entry: bool = True,
     ) -> tuple[bool, str]:
         """
         返回 (是否有新操作, 操作描述)
@@ -127,14 +133,8 @@ class EndWindowStrategy:
         up_mid = mkt._up_mid
         down_mid = mkt._down_mid
 
-        # 拉取盘口数据（异步，非阻塞）
-        # direction 未确定时先拉 UP 的盘口，direction 确定后再拉对应盘口
-        direction_raw = determine_direction(up_mid)
-        if direction_raw != "NONE":
-            token_id = mkt.token_up_id if direction_raw == "UP" else mkt.token_down_id
-            book = await self._pm.get_orderbook(token_id) if self._pm else None
-        else:
-            book = await self._pm.get_orderbook(mkt.token_up_id) if self._pm else None
+        # 盘口数据只在真正需要时拉取（见 _check_entry 的硬条件检查之后），
+        # 避免整个窗口期间每个 tick 都发起一次 CLOB /book 请求。
 
         # ── 1. 退出检查 ────────────────────────────────────────────────
         if asset in self._positions:
@@ -148,8 +148,11 @@ class EndWindowStrategy:
                 pnl_pct=self._calc_pnl_pct(pos, up_mid, down_mid),
             )
             if exit_sig.should_exit:
-                return self._handle_exit(asset, ctx, exit_sig)
+                return await self._handle_exit(asset, ctx, exit_sig)
             return False, ""
+
+        if not allow_entry:
+            return False, "max_open_positions"
 
         # ── 2. 入场检查 ────────────────────────────────────────────────
         return await self._check_entry(
@@ -157,7 +160,6 @@ class EndWindowStrategy:
             elapsed, up_mid, down_mid,
             main_has_position, main_direction,
             market_duration_sec=market_duration_sec,
-            orderbook=book,
         )
 
     # ── 入场 ───────────────────────────────────────────────────────────────
@@ -174,12 +176,17 @@ class EndWindowStrategy:
         main_direction: str,
         *,
         market_duration_sec: float = 900.0,
-        orderbook: dict | None = None,
     ) -> tuple[bool, str]:
         mkt = ctx.market
+        if mkt is None:
+            return False, "no_market"
         direction = determine_direction(up_mid)
         if direction == "NONE":
             return False, "no_direction"
+
+        # 同一窗口只允许一次建仓（即使已经止盈/止损离场）
+        if self._traded_conditions.get(asset) == mkt.condition_id:
+            return False, "already_traded_window"
 
         # H1: 时机窗口
         ok, reason = self.signal.check_hard_timing(elapsed)
@@ -197,6 +204,12 @@ class EndWindowStrategy:
         )
         if not ok:
             return False, f"conflict:{reason}"
+
+        # 通过硬条件后再拉盘口（D5 流动性 + 滑点估算），减少无谓请求
+        orderbook: dict | None = None
+        if self._pm is not None:
+            token_id = mkt.token_up_id if direction == "UP" else mkt.token_down_id
+            orderbook = await self._pm.get_orderbook(token_id)
 
         # 计算五维置信度（含 D5 流动性）
         conf = compute_confidence(
@@ -223,12 +236,20 @@ class EndWindowStrategy:
 
         # 执行入场
         entry_price = up_mid if direction == "UP" else down_mid
-        ep = await self._do_entry(asset, ctx, direction, entry_price, size, orderbook=orderbook)
+        if isinstance(indicator_signal_result, dict):
+            core_agree = int(indicator_signal_result.get("core_agree", 0))
+        else:
+            core_agree = int(getattr(indicator_signal_result, "core_agree", 0))
+        ep = await self._do_entry(
+            asset, ctx, direction, entry_price, size,
+            orderbook=orderbook, core_agree=core_agree,
+        )
         if ep is None:
             return False, "entry_failed"
 
         self._positions[asset] = ep
         self._entry_confidences[asset] = conf
+        self._traded_conditions[asset] = mkt.condition_id
         self.signal.set_position(asset, True)
 
         mode = "LIVE" if self._live_trader else "DRY"
@@ -248,16 +269,36 @@ class EndWindowStrategy:
         stake: float,
         *,
         orderbook: dict | None = None,
+        core_agree: int = 0,
     ) -> Optional[EndPosition]:
-        """执行入场（live 或 dry）。返回 EndPosition，失败返回 None。"""
+        """执行入场（live 或 dry），并写入 EntryRecord / Fill。"""
         mkt = ctx.market
+        if mkt is None:
+            logger.warning("END_ENTRY [{}] skipped: no market info", asset)
+            return None
         side = Side.UP if direction == "UP" else Side.DOWN
         token_id = mkt.token_up_id if side == Side.UP else mkt.token_down_id
+
+        # 实盘模式下 LiveTrader 不可用时禁止静默降级为 dry 模拟
+        from app.runtime_config import get_config
+        if get_config().get("live_mode", False) and self._live_trader is None:
+            logger.error(
+                "END_ENTRY [{}] live_mode=True but LiveTrader is unavailable — skipping entry",
+                asset,
+            )
+            return None
+
+        fee_rate_bps = 0
+        if self._pm is not None:
+            try:
+                fee_rate_bps = await self._pm.get_fee_rate_bps(token_id)
+            except Exception:
+                logger.debug("END_ENTRY fee_rate_bps unavailable for {} — using 0 bps", asset)
 
         # Dry-run 路径
         if self._live_trader is None:
             tokens = stake / price if price > 1e-9 else 0.0
-            return EndPosition(
+            ep = EndPosition(
                 asset=asset, direction=direction,
                 token_id=token_id, token_id_bought=token_id,
                 tokens_bought=tokens, entry_price=price,
@@ -265,14 +306,17 @@ class EndWindowStrategy:
                 stake_usdc=stake, cost_basis=stake,
                 actual_cost_usdc=stake, side=side,
                 bet_usdc=stake, anchor_price=price,
+                entry_core_agree=core_agree,
                 condition_id=mkt.condition_id,
                 opened_at=datetime.now(timezone.utc),
                 window_start=mkt.window_start,
                 window_end=mkt.window_end,
                 market=mkt,
             )
+            await self._save_entry_record(ep, mkt, fee_rate_bps, "dry", mid_price=price)
+            return ep
 
-        # Live 路径：先用盘口估算滑点，超限则跳过
+        # Live 路径：先用盘口估算滑点
         from app.pm_client import estimate_buy_slippage
         slip = 2.0  # 默认 2%
         if orderbook and self._pm:
@@ -283,8 +327,9 @@ class EndWindowStrategy:
                 slip = max(slip_est.slippage_pct, 0.5)  # 至少 0.5%
                 if not slip_est.sufficient:
                     logger.warning(
-                        "END_ENTRY [{}] {} shallow depth: tokens={:.1f} stake={:.1f}U — proceed with slip={:.1f}%",
-                        asset, direction, slip_est.depth_at_fill, stake, slip,
+                        "END_ENTRY [{}] {} shallow depth: available={:.1f} tokens stake={:.1f}U coverage={:.1f}x — proceed with slip={:.1f}%",
+                        asset, direction, slip_est.depth_at_fill, stake,
+                        slip_est.pct_of_depth, slip,
                     )
                 else:
                     logger.debug(
@@ -295,8 +340,9 @@ class EndWindowStrategy:
         try:
             result = await self._live_trader.buy_token(
                 token_id=token_id,
-                stake=stake,
-                price=price,
+                size_usdc=stake,
+                midpoint=price,
+                fee_rate_bps=fee_rate_bps,
                 neg_risk=mkt.neg_risk,
                 slippage_pct=slip,
             )
@@ -312,16 +358,82 @@ class EndWindowStrategy:
                     stake_usdc=stake, cost_basis=cost,
                     actual_cost_usdc=cost, side=side,
                     bet_usdc=stake, anchor_price=fill_price,
+                    entry_core_agree=core_agree,
+                    taker_fee_bps=fee_rate_bps,
                     condition_id=mkt.condition_id,
                     opened_at=datetime.now(timezone.utc),
                     window_start=mkt.window_start,
                     window_end=mkt.window_end,
                     market=mkt,
                 )
+                await self._save_entry_record(ep, mkt, fee_rate_bps, "live", mid_price=price)
                 return ep
         except Exception as exc:
             logger.warning("END_ENTRY {} {} failed: {}", asset, direction, exc)
         return None
+
+    async def _save_entry_record(
+        self,
+        pos: EndPosition,
+        mkt: MarketInfo,
+        fee_rate_bps: int,
+        mode: str,
+        *,
+        mid_price: float,
+    ) -> bool:
+        """写入末端策略的 EntryRecord + Fill（与主策略数据口径一致）。"""
+        from app.database import async_session
+        from app.models import EntryRecord, Fill
+
+        try:
+            async with async_session() as db:
+                fee_usdc = float(pos.cost_usdc) * fee_rate_bps / 10_000
+                entry_record = EntryRecord(
+                    asset=pos.asset,
+                    condition_id=mkt.condition_id,
+                    side=pos.side,
+                    entry_price=float(pos.entry_price),
+                    effective_entry_price=float(pos.effective_entry_price),
+                    tokens_bought=float(pos.tokens_bought),
+                    cost_usdc=float(pos.cost_usdc),
+                    fee_usdc=fee_usdc,
+                    mode=mode,
+                    entry_core_agree=int(pos.entry_core_agree),
+                )
+                db.add(entry_record)
+                await db.flush()
+
+                fill = Fill(
+                    trade_id=None,
+                    asset=pos.asset,
+                    condition_id=mkt.condition_id,
+                    side=pos.side,
+                    fill_price=float(pos.entry_price),
+                    tokens=float(pos.tokens_bought),
+                    cost_usdc=float(pos.cost_usdc),
+                    fee_usdc=fee_usdc,
+                    fill_index=0,
+                    vwap_after=float(pos.effective_entry_price),
+                    mid_price_at_fill=float(mid_price),
+                    mode=mode,
+                )
+                db.add(fill)
+                await db.flush()
+                await db.commit()
+
+                pos.entry_record_id = entry_record.id
+                logger.info(
+                    "END_SAVED entry_record id={} fill id={} for {} ({})",
+                    entry_record.id, fill.id, pos.asset, mode,
+                )
+                return True
+        except Exception as exc:
+            pos._is_orphan_position = True
+            logger.error(
+                "END_ENTRY failed to save entry/fill record for {}: {}",
+                pos.asset, exc,
+            )
+            return False
 
     # ── 退出 ───────────────────────────────────────────────────────────────
 
@@ -344,30 +456,32 @@ class EndWindowStrategy:
             return True, f"exited:{exit_sig.reason}"
 
         pnl_pct = exit_sig.pnl_pct
+        # 每日亏损控制以 USDC 计，而不是百分比
+        pnl_usd = float(pos.actual_cost_usdc) * pnl_pct / 100.0
 
         # 记录每日盈亏（所有退出类型都记录）
-        self.signal.record_pnl(asset, pnl_pct)
+        self.signal.record_pnl(asset, pnl_usd)
 
         mode = "LIVE" if self._live_trader else "DRY"
         reason_tag = f"END_{exit_sig.reason}"
 
-        # Dry-run：只记录日志
-        if self._live_trader is None or self._pos_mgr is None:
+        if self._pos_mgr is None:
             logger.info(
-                "END_EXIT [{}][{}] {} pnl%={:+.1f}% reason={}",
-                mode, asset, pos.direction, pnl_pct, exit_sig.reason,
+                "END_EXIT [{}][{}] {} pnl%={:+.1f}% pnl_usd={:+.2f} reason={} (pos_mgr unavailable)",
+                mode, asset, pos.direction, pnl_pct, pnl_usd, exit_sig.reason,
             )
             return True, f"exited:{exit_sig.reason}"
 
-        # Live 路径：通过 pos_mgr 执行实际平仓
+        # Dry 与 live 都通过 pos_mgr 写 Trade/ExitRecord：
+        # live_trader=None 时 close_position 只按当前中间价记录，不发真实卖单。
         pos._pending_close = True
         asyncio.create_task(
             self._do_close(asset, pos, reason_tag, ctx),
             name=f"end-close-{asset}",
         )
         logger.info(
-            "END_EXIT [{}][{}] {} pnl%={:+.1f}% reason={}",
-            mode, asset, pos.direction, pnl_pct, exit_sig.reason,
+            "END_EXIT [{}][{}] {} pnl%={:+.1f}% pnl_usd={:+.2f} reason={}",
+            mode, asset, pos.direction, pnl_pct, pnl_usd, exit_sig.reason,
         )
         return True, f"exited:{exit_sig.reason}"
 
@@ -376,7 +490,7 @@ class EndWindowStrategy:
         asset: str,
         pos: EndPosition,
         reason: str,
-        ctx: WindowContext,
+        ctx: WindowContext | None,
     ) -> None:
         """
         异步执行末端策略持仓的平仓。
@@ -410,12 +524,39 @@ class EndWindowStrategy:
     # ── 窗口切换时重置 ───────────────────────────────────────────────────
 
     def reset(self, asset: str) -> None:
-        """窗口切换时调用：清空该资产的末端持仓和置信度"""
+        """
+        窗口切换时调用。
+
+        若有未平仓的末端持仓，不能直接丢弃：窗口切换后 token 仍在钱包里，
+        必须异步执行平仓/赎回。这里通过 pos_mgr 调度一次 best-effort 平仓。
+        """
         popped = self._positions.pop(asset, None)
         self._entry_confidences.pop(asset, None)
+        self._traded_conditions.pop(asset, None)
         self.signal.reset(asset)
-        if popped:
-            logger.info("END_RESET [{}] — cleared position (direction={})", asset, popped.direction)
+        if not popped:
+            return
+
+        logger.warning(
+            "END_RESET [{}] — window switched with open position (direction={}, tokens={:.4f}); closing it",
+            asset, popped.direction, popped.tokens_bought,
+        )
+        if self._pos_mgr is None:
+            logger.error(
+                "END_RESET [{}] — pos_mgr unavailable, position left open "
+                "(condition_id={})", asset, popped.condition_id[:12],
+            )
+            return
+
+        popped._pending_close = True
+        try:
+            asyncio.create_task(
+                self._do_close(asset, popped, "END_WINDOW_SWITCH", None),
+                name=f"end-close-{asset}-reset",
+            )
+        except RuntimeError as exc:
+            popped._pending_close = False
+            logger.error("END_RESET [{}] — cannot schedule close (no running loop): {}", asset, exc)
 
     # ── 查询 ───────────────────────────────────────────────────────────────
 

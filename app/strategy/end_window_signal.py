@@ -252,11 +252,12 @@ def reversal_reliability(
 # ── D5: 流动性置信度 ─────────────────────────────────────────────────────────
 
 # OBI → D5 映射（线性分段）
-# OBI = (bid_vol - ask_vol) / (bid_vol + ask_vol)
+# 传入的 orderbook 是「所交易 token」的盘口（UP 持仓用 UP token，DOWN 持仓用
+# DOWN token），因此：
 #  OBI = 0   → 中性，D5 = 50
-#  OBI = +1  → 全是买方，D5 = 100（做多 UP 利好）
-#  OBI = -1  → 全是卖方，D5 = 100（做多 DOWN 利好）
-#  深度不足（depth_factor < 1.0）→ D5 降权，最差 0
+#  OBI = +1  → 全是买方，对该 token 利好，D5 = 100
+#  OBI = -1  → 全是卖方，对该 token 利空，D5 = 0
+#  深度不足（depth_factor < 1.0）→ D5 向 50 收敛 / 降权
 OBI_BULL_THRESH = 0.10   # OBI > +0.10 才算买方主导
 OBI_BEAR_THRESH = -0.10   # OBI < -0.10 才算卖方主导
 
@@ -271,16 +272,8 @@ def _obi_to_confidence(obi: float, depth_factor: float) -> float:
     # 深度充足时不额外加分；深度不足时降低 D5
     depth_multiplier = 0.5 + 0.5 * min(depth_factor, 1.0)
 
-    if abs(obi) < OBI_BULL_THRESH:
-        # 中性区域：接近 0，D5 趋向 50
-        base = 50.0
-    elif obi > 0:
-        # 买方主导：obi 越接近 +1，D5 越高（最高 100）
-        base = 50.0 + 50.0 * min(obi / (1.0 - OBI_BULL_THRESH), 1.0)
-    else:
-        # 卖方主导：obi 越接近 -1，D5 越高（最高 100）
-        base = 50.0 + 50.0 * min(abs(obi) / (1.0 - OBI_BEAR_THRESH), 1.0)
-
+    # OBI ∈ [-1, 1] 线性映射到 [0, 100]：0 → 50，+1 → 100，-1 → 0
+    base = 50.0 + 50.0 * max(-1.0, min(1.0, obi))
     return max(0.0, min(100.0, base * depth_multiplier))
 
 
@@ -294,10 +287,11 @@ def compute_liquidity_confidence(
     """
     从盘口数据计算 D5 流动性置信度。
 
-    orderbook: pm_client.get_orderbook() 返回的原始 dict
+    orderbook: pm_client.get_orderbook() 返回的原始 dict，必须是「所交易 token」
+               的盘口（UP 持仓传 UP token，DOWN 持仓传 DOWN token）
                格式：{"bids": [{"price": "0.46", "size": "150"}, ...],
                       "asks": [{"price": "0.47", "size": "120"}, ...]}
-    direction: "UP" / "DOWN" — 决定用哪边档位算深度因子
+    direction: "UP" / "DOWN" — 保留参数以兼容调用方（OBI 已按所持 token 解释）
     min_depth_tokens: 每档最低 token 数量（过滤虚假档位）
     min_levels: 最低档位数（低于此数认为深度不足）
 
@@ -339,13 +333,10 @@ def compute_liquidity_confidence(
     depth_factor = total_vol / min_expected if min_expected > 0 else 1.0
     depth_ok = depth_factor >= 1.0
 
-    # OBI 方向检查：若做 UP 但卖方主导（OBI 显著为负），则降低权重
-    if direction == "UP":
-        if obi < OBI_BEAR_THRESH:
-            depth_ok = False   # 降权但不断言失败
-    elif direction == "DOWN":
-        if obi > OBI_BULL_THRESH:
-            depth_ok = False
+    # OBI 方向检查：orderbook 是所交易 token 的盘口，
+    # 卖方主导（OBI 显著为负）对持仓方向不利，标记 depth_ok=False。
+    if obi < OBI_BEAR_THRESH:
+        depth_ok = False
 
     D5 = _obi_to_confidence(obi, depth_factor)
 

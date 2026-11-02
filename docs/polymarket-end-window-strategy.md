@@ -674,14 +674,9 @@ def check_main_strategy_conflict(
     if not main_has_position:
         return True, "ok"  # 主策略未持仓，不冲突
 
-    if main_direction == "NONE":
-        return True, "ok"  # 主策略无方向，不冲突
-
-    if main_direction == direction:
-        return True, "can_add"  # 方向一致，可以叠加
-
-    # 方向矛盾
-    return False, "main_opposite_direction"
+    # 同一窗口内最多一个策略持仓：主策略已持仓或已经交易过时，
+    # 末端策略一律跳过，即使方向相同也不叠加仓位。
+    return False, "main_has_position"
 ```
 
 ### 4.3 完整入场决策流程
@@ -800,18 +795,13 @@ DIRECTION_REVERSAL_STOP = 0.05  # 5%
 
 def should_exit_on_reversal(
     direction: str,
-    price_at_t12: float,
-    current_price: float,
+    entry_price: float,     # 所持有 token 的入场价（UP 用 UP token，DOWN 用 DOWN token）
+    current_price: float,   # 所持有 token 的当前价
 ) -> bool:
-    if direction == "UP":
-        # UP 方向：当前价格跌破 T=12min 时的价格 5% → 止损
-        if current_price < price_at_t12 * (1 - DIRECTION_REVERSAL_STOP):
-            return True
-    elif direction == "DOWN":
-        # DOWN 方向：当前价格上涨超过 T=12min 时的价格 5% → 止损
-        if current_price > price_at_t12 * (1 + DIRECTION_REVERSAL_STOP):
-            return True
-    return False
+    """无论 UP/DOWN，所持 token 价格从入场价下跌超过 5% 即视为方向反转。"""
+    if direction not in ("UP", "DOWN"):
+        return False
+    return current_price < entry_price * (1 - DIRECTION_REVERSAL_STOP)
 ```
 
 ### 6.3 止盈（宽松）

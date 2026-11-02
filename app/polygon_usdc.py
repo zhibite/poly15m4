@@ -28,7 +28,7 @@ CLOB_EXCHANGE_V2      = "0xE111180000d2663C0091e4f400237545B87B996B"  # CTF Exch
 
 # ABI function signatures (4-byte selectors)
 _BALANCE_OF_SELECTOR = bytes.fromhex("70a08231")
-_TRANSFER_SELECTOR   = bytes.fromhex("a9050cbb")
+_TRANSFER_SELECTOR   = bytes.fromhex("a9059cbb")  # transfer(address,uint256)
 _APPROVE_SELECTOR    = bytes.fromhex("095ea7b3")
 _WRAP_SELECTOR       = bytes.fromhex("62355638")   # wrap(address,address,uint256) — 3 params
 

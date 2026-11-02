@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from app.api.analysis_routes import router as analysis_router
 from app.api.auth_routes import router as auth_router
 from app.api.pages import router as pages_router
 from app.api.routes import (
@@ -63,6 +64,8 @@ async def _reload_live_trader():
     except Exception as exc:
         logger.warning("LiveTrader init failed: {}", exc)
         set_live_trader_ref(None)
+        if strategy:
+            strategy.set_live_trader(None)
 
 
 def _handle_task_exception(task: asyncio.Task) -> None:
@@ -137,10 +140,12 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 else:
-    logger.warning("Static directory {} not found — skipping static mount", STATIC_DIR)
+    # 前端由 templates/ 提供，static/ 仅用于可选的静态资源
+    logger.debug("Static directory {} not found — skipping static mount", STATIC_DIR)
 
 app.include_router(api_router)
 app.include_router(pages_router)
 app.include_router(ws_router)
 app.include_router(auth_router)
 app.include_router(indicators_router)
+app.include_router(analysis_router)

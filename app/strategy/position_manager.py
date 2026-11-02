@@ -476,8 +476,10 @@ class PositionManager:
                 # Record trade using tokens_at_entry (original position size) BEFORE
                 # the force-sell pollutes the balance.  The PnL is based on what was
                 # entered, not what we failed to sell.
+                # NOTE: initialise unconditionally — already_recorded may be True,
+                # in which case avg_first_exit is still needed by the return below.
+                avg_first_exit = _avg_fill()
                 if not already_recorded:
-                    avg_first_exit = _avg_fill()
                     await self._record_trade(
                         pos, avg_first_exit, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
@@ -593,6 +595,14 @@ class PositionManager:
 
         # ── 普通路径：先用 cached price，无则拉取 ────────────────────────────
         sell_price = await self._fetch_sell_price(pos, mkt)
+
+        # Dry-run 成本模型：按资产滑点扣减卖出价，使模拟 PnL 更接近实盘
+        if live_trader is None and sell_price > 0:
+            cfg = get_config()
+            slip_key = "btc_slippage_pct" if pos.asset == "BTC" else "eth_slippage_pct"
+            slip_pct = max(0.0, float(cfg.get(slip_key, 1.0)))
+            sell_price = max(0.0001, sell_price * (1.0 - slip_pct / 100.0))
+
         pnl_pct_preview, _ = self._compute_pnl(pos, sell_price, pos.tokens_bought)
 
         if live_trader is None:
@@ -836,9 +846,20 @@ class PositionManager:
         resolved_market=None,
     ) -> tuple[bool, Optional[datetime], Optional[float], Optional[dict], Optional[bool]]:
         """
-        检查窗口是否已到期需要结算。
+        检查窗口是否已到期且结算结果可用。
+
         Returns: (settled, settle_at, effective_price, backfill_data, up_wins)
         up_wins is None when settled=False; otherwise True/False indicating which side won.
+
+        结算流程（live / dry 一致）：
+          1. 窗口结束后先等待 settle_grace_sec
+          2. 向 Gamma 查询结算结果；拿到结果即返回
+          3. 超过 grace + max_wait 仍拿不到 → 回退到 CLOB 中间价
+          4. 其余情况返回 settled=False，调用方必须继续持仓等待，
+             不能按中间价卖出（到期后 CLOB 通常已停止撮合）
+
+        每次调用只查询一次 Gamma，不在这里 sleep/重试；主循环会在后续
+        tick 继续调度，避免阻塞策略循环。
         """
         cfg = get_config()
         grace_sec = cfg.get("settle_grace_sec", 90)
@@ -848,51 +869,13 @@ class PositionManager:
         # negative before.  Used to check grace period and compute settle timeout.
         past_window_sec = (now - pos.window_end).total_seconds()
 
-        # 结算必须用建仓窗口的价格，不允许跨窗口判断胜负
-        settle_mkt = pos.market
-        if settle_mkt is None:
-            settle_mkt = resolved_market
-
-        # Dry-run：按胜负计算结算价（UP=1.0, DOWN=1.0），非 CLOB 盘口
-        if not cfg.get("live_mode", False):
-            if settle_mkt:
-                up_mid, down_mid = await self._fetch_prices(settle_mkt)
-            else:
-                up_mid, down_mid = 0.5, 0.5
-            up_wins = up_mid >= 0.5
-            # effective 反映实际盈亏：持有方向胜 = 1.0，负 = 0.0
-            effective = 1.0 if (up_wins and pos.side == Side.UP) or (not up_wins and pos.side == Side.DOWN) else 0.0
-            up_final = 1.0 if up_wins else 0.0
-            down_final = 0.0 if up_wins else 1.0
-            backfill = {
-                "up_wins": up_wins,
-                "up_price_final": up_final,
-                "down_price_final": down_final,
-            }
-            return True, now, effective, backfill, up_wins
-
         if past_window_sec < grace_sec:
             return False, None, None, None, None
 
-        settle_at = now
+        # 结算必须用建仓窗口的价格，不允许跨窗口判断胜负
+        settle_mkt = pos.market or resolved_market
 
-        # Retry resolution up to 2 times with a short delay — Gamma may briefly be unavailable
-        # while the market is already resolved on-chain.
-        res = None
-        for attempt in range(2):
-            res = await self._resolve(pos.condition_id)
-            if res is not None:
-                break
-            if attempt == 0:
-                await asyncio.sleep(5)  # brief wait before retry
-        else:
-            # Gamma unreachable for 2 attempts — log and continue to timeout check
-            logger.warning(
-                "settle_if_due {}: Gamma resolution unreachable after 2 attempts "
-                "(past_window_sec={:.0f}s past window_end)",
-                pos.condition_id[:12], past_window_sec,
-            )
-
+        res = await self._resolve(pos.condition_id)
         if res and res.get("resolved"):
             up_wins = res.get("up_wins")
             if up_wins is not None:
@@ -905,7 +888,7 @@ class PositionManager:
                     "up_price_final": up_final,
                     "down_price_final": down_final,
                 }
-                return True, settle_at, effective, backfill, up_wins
+                return True, now, effective, backfill, up_wins
 
         if past_window_sec >= grace_sec + max_wait_sec:
             # 结算兜底条件：
@@ -925,8 +908,17 @@ class PositionManager:
                 "up_price_final": up_mid,
                 "down_price_final": down_mid,
             }
-            return True, settle_at, effective, backfill, up_wins
+            logger.warning(
+                "settle_if_due {}: Gamma resolution unavailable after {:.0f}s past window_end — "
+                "falling back to CLOB mid (up={:.4f})",
+                pos.condition_id[:12], past_window_sec, up_mid,
+            )
+            return True, now, effective, backfill, up_wins
 
+        logger.debug(
+            "settle_if_due {}: awaiting Gamma resolution ({:.0f}s past window_end)",
+            pos.condition_id[:12], past_window_sec,
+        )
         return False, None, None, None, None
 
     async def _resolve(self, condition_id: str) -> Optional[dict]:
@@ -1003,6 +995,8 @@ class PositionManager:
                 bet_usdc=pos.actual_cost_usdc,
                 mode="live" if is_live else "dry",
                 fills=actual_fills,
+                strategy="end" if (close_reason or "").startswith("END_") else "main",
+                entry_core_agree=int(getattr(pos, "entry_core_agree", 0) or 0),
                 opened_at=pos.opened_at,
                 closed_at=now,
             )
