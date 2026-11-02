@@ -228,7 +228,10 @@ async def _liq_ws_listener(asset: str):
     """Subscribe to Binance futures force-order stream and accumulate into buckets."""
     import websockets
     symbol_fut = f"{asset}USDT"
-    ws_url = "wss://fstream.binance.com:9443/ws/!forceOrder@arr"
+    # Use the standard 443 endpoint.  Some hosts/networks block Binance's
+    # legacy 9443 port, which caused repeated "timed out during opening
+    # handshake" warnings and left liquidation data unavailable.
+    ws_url = "wss://fstream.binance.com/ws/!forceOrder@arr"
     bucket_ttl = 30 * 60   # 30 minutes
     reconnect_delay = 5.0    # seconds before reconnecting
     max_reconnect_attempts = 5
