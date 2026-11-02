@@ -99,6 +99,10 @@ class PolymarketClient:
 
         markets: list[dict] = []
         for ts in candidates:
+            # Expired windows can never be selected by discover_market — skip
+            # them to avoid pointless Gamma requests on every discovery.
+            if ts + window_sec <= now:
+                continue
             slug = f"{prefix}-{ts}"
             try:
                 resp = await c.get(
@@ -157,7 +161,11 @@ class PolymarketClient:
                         # M4: store neg_risk flag (default False; per-market CLOB call resolves it)
                         m["_neg_risk"] = False
                         markets.append(m)
-                if not markets and asset:
+                # The current window's event is authoritative and sufficient —
+                # stop querying later slots.
+                if markets:
+                    break
+                if asset:
                     logger.debug(
                         "get_asset_updown_markets({} {} {}s) returned 0 markets for slug prefix {}",
                         asset, slug_interval, window_sec, prefix,

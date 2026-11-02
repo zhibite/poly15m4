@@ -31,6 +31,24 @@ router = APIRouter(tags=["websocket"])
 
 PUSH_INTERVAL_SEC = 1.0
 
+_COOKIE_NAME = "pm_token"
+
+
+def _ws_is_authenticated(ws: WebSocket) -> bool:
+    """Validate JWT from HttpOnly cookie or ?token= query parameter."""
+    from app.auth import verify_token
+
+    token = ws.cookies.get(_COOKIE_NAME) or ws.query_params.get("token", "")
+    return bool(token and verify_token(token))
+
+
+async def _reject_unauthenticated(ws: WebSocket) -> bool:
+    """Return True when the connection was rejected (caller must return)."""
+    if _ws_is_authenticated(ws):
+        return False
+    await ws.close(code=1008)
+    return True
+
 # Shared singleton client for ws/prices — avoids creating a new httpx client per connection
 _ws_prices_pm: PolymarketClient | None = None
 _ws_prices_pm_lock = asyncio.Lock()
@@ -43,6 +61,8 @@ _ws_http_lock = asyncio.Lock()
 @router.websocket("/ws/live")
 async def ws_live(ws: WebSocket):
     await ws.accept()
+    if await _reject_unauthenticated(ws):
+        return
     strategy_ref = _get_strategy_ref()
     last_pong_at = datetime.now(timezone.utc)
     try:
@@ -75,6 +95,8 @@ async def ws_live(ws: WebSocket):
 async def ws_prices(ws: WebSocket):
     global _ws_prices_pm
     await ws.accept()
+    if await _reject_unauthenticated(ws):
+        return
     async with _ws_prices_pm_lock:
         if _ws_prices_pm is None:
             _ws_prices_pm = PolymarketClient()
@@ -193,6 +215,8 @@ async def ws_indicators(ws: WebSocket):
     前端在连接后可通过发送 {"asset":"BTC"} 或 {"asset":"ETH"} 切换资产。
     """
     await ws.accept()
+    if await _reject_unauthenticated(ws):
+        return
     strategy_ref = _get_strategy_ref()
     asset = "BTC"
 

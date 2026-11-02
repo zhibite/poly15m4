@@ -87,6 +87,13 @@ poly15m4/
 - 实盘切换：先 `POST /api/live/confirm`，再在 5 分钟内把 `live_mode` 设为 `true`
 - 末端策略参数：`END_*`（见 `.env.example`），默认 `END_ENABLED=false`
 
+## 安全说明
+
+- 除 `/api/auth/*` 外，所有 REST API 都需要 JWT（`Authorization: Bearer` 或 `pm_token` Cookie）；WebSocket 同样校验 Cookie / `?token=`
+- `python run.py` 默认只监听 `127.0.0.1`；容器中由 Dockerfile / docker-compose 设置 `HOST=0.0.0.0`
+- 建议设置 `SETUP_TOKEN`，防止首次创建用户（admin）被他人抢占；设置后注册时必须提供 `setup_token`
+- 不要把包含 `WALLET_PRIVATE_KEY` / `API_SECRET` 的 `.env`、`.env.docker` 提交到版本库
+
 ## 文档
 
 - [策略优化与 A/B 指南](docs/strategy-optimization.md)

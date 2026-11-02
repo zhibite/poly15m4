@@ -31,16 +31,21 @@
     <label>密码</label>
     <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
   </div>
+  <div class="form-group">
+    <label>初始化口令（仅首次创建用户时需要）</label>
+    <input type="password" id="setup_token" placeholder="留空即可（未配置 SETUP_TOKEN 时）" autocomplete="off">
+  </div>
   <button onclick="login()">登录</button>
   <div class="error" id="error"></div>
   <div class="success" id="success"></div>
-  <div class="hint" id="hint">首次使用将自动创建管理员账户</div>
+  <div class="hint" id="hint">首次使用将自动创建管理员账户；若服务端配置了 SETUP_TOKEN，请填写初始化口令</div>
 </div>
 <script>
 const API = '';
 async function login() {
   const username = document.getElementById('username').value.trim();
   const password = document.getElementById('password').value;
+  const setupToken = document.getElementById('setup_token').value;
   const errorEl = document.getElementById('error');
   const successEl = document.getElementById('success');
   errorEl.style.display = 'none';
@@ -49,7 +54,7 @@ async function login() {
     const r = await fetch(API + '/api/auth/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, password}),
+      body: JSON.stringify({username, password, setup_token: setupToken}),
     });
     const d = await r.json();
     if (!r.ok) { errorEl.textContent = d.detail || '登录失败'; errorEl.style.display = 'block'; return; }

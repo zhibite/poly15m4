@@ -99,18 +99,29 @@ class SinglePositionStrategy:
         self.sell_max_retry_count: int = 3
 
         # ── Binance 数据缓存（缓变数据，避免每 tick 重复请求）────────────────
-        self._http_cache: dict[str, tuple[float, float]] = {}  # (value, timestamp)
+        self._http_cache: dict[str, tuple] = {}  # (value, timestamp)
         self._http_cache_ttl: float = 30.0  # seconds
-        # Shared httpx client to avoid creating a new client per tick (reduces memory pressure)
-        self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, connect=5.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
+        # Shared httpx client to avoid creating a new client per tick (reduces memory pressure).
+        # Created lazily so stop()/start() can safely recreate it after aclose().
+        self._http_client: httpx.AsyncClient | None = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Return a live AsyncClient, recreating it after stop()/close()."""
+        client = self._http_client
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            self._http_client = client
+        return client
 
     async def start(self) -> bool:
         async with self._running_lock:
             if self._running:
                 return True
+            # Recreate the shared client if a previous stop() closed it.
+            self._get_http_client()
             self._running = True
             self._prev_running = True
             logger.info("Strategy STARTED")
@@ -122,7 +133,10 @@ class SinglePositionStrategy:
             self._running = False
             self._prev_running = False
             if was:
-                await self._http_client.aclose()
+                client = self._http_client
+                if client is not None and not client.is_closed:
+                    await client.aclose()
+                self._http_client = None
                 logger.info("Strategy STOPPED")
             return was
 
@@ -137,8 +151,8 @@ class SinglePositionStrategy:
         # 避免钱包/凭证失效后控制器仍持有旧的 LiveTrader 引用。
         if self._entry_ctrl is not None:
             self._entry_ctrl._live_trader = trader
-        # end_strategy.tick() receives live_trader as a parameter from run_forever,
-        # but we also store it here so _do_close can access it asynchronously.
+        # tick() 的 live_trader 参数只表示“本次是否允许实盘入场”；
+        # 这里保存实际引用，供末端策略在平仓/窗口切换时使用（即使 live_mode 已关闭）。
         if self._end_strategy is not None:
             self._end_strategy._live_trader = trader
 
@@ -178,6 +192,9 @@ class SinglePositionStrategy:
         )
         # 末端策略必须在 _exit_ctrl 之后创建，以便注入 pos_mgr
         self._end_strategy = EndWindowStrategy(pos_mgr=self._pos_mgr, pm=self.pm)
+        # set_live_trader() 可能在本方法之前已被调用（此时 _end_strategy 还不存在），
+        # 这里补一次引用；后续 LiveTrader 重建时 set_live_trader 会继续同步。
+        self._end_strategy._live_trader = self._live_trader
         self._entry_ctrl = EntryController(
             pm=self.pm,
             market_svc=self._market_svc,
@@ -351,10 +368,22 @@ class SinglePositionStrategy:
             if not settled:
                 return
 
+            # 结算也必须按持仓自身模式执行：live 持仓不能因为 live_mode 被关闭
+            # 而按 dry 记录（那样真实的 winning token 不会被赎回）。
+            pos_mode = getattr(pos, "execution_mode", "dry")
+            settle_trader = self._live_trader if pos_mode == "live" else None
+            if pos_mode == "live" and settle_trader is None:
+                logger.error(
+                    "SETTLE [{}] live position but LiveTrader unavailable — "
+                    "keeping in pending queue (condition={})",
+                    pos.asset, condition_id[:12],
+                )
+                return
+
             await self._pos_mgr.close_position(
                 pos,
                 ExitReason.SETTLE,
-                live_trader=self._live_trader if self.live_mode else None,
+                live_trader=settle_trader,
                 resolved_market=pos.market,
                 settle_up_wins=up_wins,
             )
@@ -460,7 +489,7 @@ class SinglePositionStrategy:
                         symbol = f"{asset}USDT"
 
                         funding, oi, obi = await self._fetch_cached_indicators(symbol, now_ts)
-                        klines = await self._fetch_klines(symbol)
+                        klines = await self._fetch_klines_cached(symbol, now_ts)
                         closes  = klines.get("closes", [])  if klines  else []
                         highs   = klines.get("highs", [])   if klines  else []
                         lows    = klines.get("lows", [])    if klines  else []
@@ -531,9 +560,12 @@ class SinglePositionStrategy:
                         continue
                     exit_signal = self._exit_ctrl.check_exit(ctx)
                     if exit_signal.should_exit:
+                        # ExitController 会按 pos.execution_mode 决定是否真正使用
+                        # LiveTrader；这里始终传入实际引用，避免 live_mode 中途
+                        # 关闭导致实盘持仓被当成 dry 平仓。
                         await self._exit_ctrl.handle_exit(
                             asset, ctx, exit_signal,
-                            live_trader=self._live_trader if self.live_mode else None,
+                            live_trader=self._live_trader,
                         )
 
                 # 2. 入场检查（仅无持仓时）
@@ -555,36 +587,50 @@ class SinglePositionStrategy:
                         open_count += 1
 
                 # 3. 末端策略 tick（T=12min~14.5min，独立入场/退出）
+                #
+                # 退出检查必须始终运行：如果用户在持仓期间关闭 end_enabled 或
+                # 对应资产开关，已有持仓仍需要 E1 硬截止 / TP / SL 管理，直到
+                # 平仓完成。只有“新入场”受开关控制（allow_entry）。
                 if self._end_strategy:
                     cfg = get_config()
-                    if cfg.get("end_enabled", False):
-                        end_ops = [
-                            a for a in ("BTC", "ETH")
-                            if cfg.get(f"end_asset_{a.lower()}_enabled", True)
-                        ]
-                        for asset in end_ops:
-                            ctx = ctxs.get(asset)
-                            if not ctx or not ctx.market:
-                                continue
-                            sig_result = self._latest_indicators.get(asset)
-                            # 主策略在本窗口有持仓或已经交易过 → 末端策略跳过（不叠加）
-                            main_has_pos = (ctx.position is not None) or ctx.is_traded
-                            main_dir = (
-                                ctx.position.side.value
-                                if ctx.position else "NONE"
-                            )
-                            acted, desc = await self._end_strategy.tick(
-                                asset=asset,
-                                ctx=ctx,
-                                indicator_signal_result=sig_result,
-                                main_has_position=main_has_pos,
-                                main_direction=main_dir,
-                                live_trader=self._live_trader if self.live_mode else None,
-                                market_duration_sec=float(self.market_duration_sec),
-                                allow_entry=open_count < max_open,
-                            )
-                            if acted and desc.startswith("entered"):
-                                open_count += 1
+                    end_enabled = bool(cfg.get("end_enabled", False))
+                    end_assets = [
+                        a for a in ("BTC", "ETH")
+                        if cfg.get(f"end_asset_{a.lower()}_enabled", True)
+                    ]
+                    end_ops = [
+                        a for a in ("BTC", "ETH")
+                        if a in end_assets or self._end_strategy.has_position(a)
+                    ]
+                    for asset in end_ops:
+                        ctx = ctxs.get(asset)
+                        if not ctx or not ctx.market:
+                            continue
+                        sig_result = self._latest_indicators.get(asset)
+                        # 主策略在本窗口有持仓或已经交易过 → 末端策略跳过（不叠加）
+                        main_has_pos = (ctx.position is not None) or ctx.is_traded
+                        main_dir = (
+                            ctx.position.side.value
+                            if ctx.position else "NONE"
+                        )
+                        allow_entry = (
+                            end_enabled
+                            and asset in end_assets
+                            and open_count < max_open
+                            and not self._entry_ctrl.is_locked(asset)
+                        )
+                        acted, desc = await self._end_strategy.tick(
+                            asset=asset,
+                            ctx=ctx,
+                            indicator_signal_result=sig_result,
+                            main_has_position=main_has_pos,
+                            main_direction=main_dir,
+                            live_trader=self._live_trader if self.live_mode else None,
+                            market_duration_sec=float(self.market_duration_sec),
+                            allow_entry=allow_entry,
+                        )
+                        if acted and desc.startswith("entered"):
+                            open_count += 1
 
                 # 3. FOK 重试
                 await self._entry_ctrl.fire_entry_retries(ctxs)
@@ -753,7 +799,7 @@ class SinglePositionStrategy:
 
     async def _fetch_klines(self, symbol: str, limit: int = 500) -> dict | None:
         try:
-            r = await self._http_client.get(
+            r = await self._get_http_client().get(
                 "https://api.binance.com/api/v3/klines",
                 params={"symbol": symbol, "interval": "1m", "limit": limit},
             )
@@ -770,9 +816,20 @@ class SinglePositionStrategy:
         except Exception:
             return None
 
+    async def _fetch_klines_cached(self, symbol: str, now_ts: float) -> dict | None:
+        """Klines 只需用于当前 tick 的指标展示/CVD；5s TTL 避免每秒重复拉 500 根。"""
+        key = f"klines:{symbol}"
+        cached = self._http_cache.get(key)
+        if cached and (now_ts - cached[1]) < 5.0:
+            return cached[0]
+        data = await self._fetch_klines(symbol)
+        if data is not None:
+            self._http_cache[key] = (data, now_ts)
+        return data
+
     async def _fetch_funding(self, symbol: str) -> float | None:
         try:
-            r = await self._http_client.get(
+            r = await self._get_http_client().get(
                 "https://fapi.binance.com/fapi/v1/premiumIndex",
                 params={"symbol": symbol},
             )
@@ -783,7 +840,7 @@ class SinglePositionStrategy:
 
     async def _fetch_oi(self, symbol: str) -> float | None:
         try:
-            r = await self._http_client.get(
+            r = await self._get_http_client().get(
                 "https://fapi.binance.com/fapi/v1/openInterest",
                 params={"symbol": symbol},
             )
@@ -794,7 +851,7 @@ class SinglePositionStrategy:
 
     async def _fetch_obi(self, symbol: str) -> dict | None:
         try:
-            r = await self._http_client.get(
+            r = await self._get_http_client().get(
                 "https://api.binance.com/api/v3/depth",
                 params={"symbol": symbol, "limit": 10},
             )
@@ -811,11 +868,12 @@ class SinglePositionStrategy:
 
     async def _fetch_spot_prices(self) -> tuple[float, float]:
         try:
-            btc_r = await self._http_client.get(
+            client = self._get_http_client()
+            btc_r = await client.get(
                 "https://api.binance.com/api/v3/ticker/price",
                 params={"symbol": "BTCUSDT"},
             )
-            eth_r = await self._http_client.get(
+            eth_r = await client.get(
                 "https://api.binance.com/api/v3/ticker/price",
                 params={"symbol": "ETHUSDT"},
             )
@@ -877,14 +935,27 @@ class SinglePositionStrategy:
         return funding, oi, obi
 
     async def close(self):
-        # Cancel pending settlement tasks best-effort. Positions that were mid-close
-        # remain in _pending_settlements only in memory; a restart requires manual
-        # reconciliation (tokens stay in the wallet).
+        # Let in-flight close / settlement tasks finish before tearing down the
+        # HTTP and LiveTrader clients.  Anything still running after the grace
+        # period is cancelled; those positions may require manual reconciliation.
+        if self._exit_ctrl is not None:
+            try:
+                await self._exit_ctrl.close()
+            except Exception as exc:
+                logger.warning("ExitController close wait failed: {}", exc)
+        if self._end_strategy is not None:
+            try:
+                await self._end_strategy.close()
+            except Exception as exc:
+                logger.warning("EndWindow close wait failed: {}", exc)
+
         tasks = [t for t in self._settlement_tasks.values() if t and not t.done()]
-        for t in tasks:
-            t.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            _done, pending = await asyncio.wait(tasks, timeout=10.0)
+            if pending:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         self._settlement_tasks.clear()
 
         if self._pending_settlements:
@@ -893,6 +964,19 @@ class SinglePositionStrategy:
                 len(self._pending_settlements),
                 [f"{p.asset}:{cid[:8]}" for cid, p in self._pending_settlements.items()],
             )
+
+        if self._market_svc is not None:
+            try:
+                await self._market_svc.close()
+            except Exception:
+                pass
+        client = self._http_client
+        if client is not None and not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        self._http_client = None
 
         await self.pm.close()
         if self._live_trader:

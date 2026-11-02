@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -23,6 +23,7 @@ from app.api.websocket import router as ws_router
 from app.api.indicators import router as indicators_router
 
 
+from app.auth import get_current_user
 from app.database import init_db
 from app.config import settings
 from app.runtime_config import get_creds
@@ -143,9 +144,12 @@ else:
     # 前端由 templates/ 提供，static/ 仅用于可选的静态资源
     logger.debug("Static directory {} not found — skipping static mount", STATIC_DIR)
 
-app.include_router(api_router)
+# All /api routes require a valid JWT (Bearer header or HttpOnly cookie),
+# except the auth endpoints (login/register/logout/me) and WebSocket handlers
+# (ws_router validates the token itself on connect).
+app.include_router(api_router, dependencies=[Depends(get_current_user)])
 app.include_router(pages_router)
 app.include_router(ws_router)
 app.include_router(auth_router)
-app.include_router(indicators_router)
-app.include_router(analysis_router)
+app.include_router(indicators_router, dependencies=[Depends(get_current_user)])
+app.include_router(analysis_router, dependencies=[Depends(get_current_user)])

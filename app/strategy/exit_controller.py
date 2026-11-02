@@ -7,6 +7,7 @@ exit_controller.py — 退出控制器（简版：TP + SL 直接触发，无三�
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,7 +16,12 @@ from loguru import logger
 
 from app.models import Side
 from app.strategy.models import OpenPosition
-from app.strategy.position_manager import AlreadyClosedError, CLOBExitError, PositionManager
+from app.strategy.position_manager import (
+    AlreadyClosedError,
+    CLOBExitError,
+    LiveTraderUnavailableError,
+    PositionManager,
+)
 from app.strategy.position_state import ExitReason
 from app.strategy.window_context import WindowContext
 
@@ -45,7 +51,9 @@ class ExitController:
         self._pos_mgr = pos_mgr
         self._decision_logger = decision_logger
         self._risk_manager = risk_manager
-        self._exit_retry_locks: dict[str, asyncio.Lock] = {}
+        # Track in-flight close tasks so shutdown can wait for them before
+        # closing the HTTP/LiveTrader clients.
+        self._close_tasks: set[asyncio.Task] = set()
 
         # 出场策略参数（可通过 /api/config 做 A/B）
         self._hold_to_settlement = False
@@ -88,6 +96,10 @@ class ExitController:
         mkt = ctx.market
 
         if getattr(pos, "_pending_close", False):
+            return ExitSignal()
+
+        # 上一次平仓失败后的冷却期：保留持仓，稍后由主循环重试。
+        if time.time() < getattr(pos, "_next_close_retry_at", 0.0):
             return ExitSignal()
 
         # 无效持仓
@@ -258,7 +270,7 @@ class ExitController:
     ) -> None:
         pos._pending_close = True
         ctx._pending_close = True
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._do_close(
                 asset, pos, reason, live_trader, ctx,
                 settle_up_wins=settle_up_wins,
@@ -266,6 +278,24 @@ class ExitController:
             ),
             name=f"close-{asset}",
         )
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+
+    async def close(self, timeout: float = 10.0) -> None:
+        """Wait for in-flight close tasks before clients are torn down."""
+        tasks = [t for t in self._close_tasks if not t.done()]
+        if not tasks:
+            return
+        logger.info("Waiting for {} in-flight close task(s)...", len(tasks))
+        _done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                "{} close task(s) did not finish in {:.0f}s — cancelling",
+                len(pending), timeout,
+            )
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _record_risk(self, pos: OpenPosition) -> None:
         """把已实现盈亏上报给主策略风控（每个持仓只上报一次）。"""
@@ -291,24 +321,41 @@ class ExitController:
         settle_up_wins: Optional[bool] = None,
         partial_close_pct: Optional[float] = None,
     ) -> None:
+        """执行平仓。
 
-        def _cleanup():
-            # 只有当 ctx 仍指向本持仓时才清理 ctx 状态：
-            # 平仓任务可能跨越窗口切换，此时的 ctx 已属于新窗口，
-            # 不能误清掉新窗口的持仓 / pending 标记。
+        失败时保留 ctx.position 和持仓对象，仅释放 pending 标记并设置冷却时间，
+        让主循环在后续 tick 重试。只有成功 / AlreadyClosed 才真正清理持仓，
+        避免“策略认为已平仓、链上 token 还在钱包里”的情况。
+        """
+
+        def _release_pending():
+            # 只释放 pending 标记，不丢弃持仓。
+            if ctx.position is pos:
+                ctx._pending_close = False
+            pos._pending_close = False
+
+        def _finalize():
+            # 只有在确认持仓已平掉（或链上已无余额）后才清空状态。
             if ctx.position is pos:
                 ctx.on_exit_complete()
             if ctx.condition_id == pos.condition_id:
                 ctx._pending_close = False
             pos._pending_close = False
             pos.sell_retry_count = 0
+            pos._close_attempts = 0
+            pos._next_close_retry_at = 0.0
+
+        def _schedule_retry(delay_sec: float):
+            pos._close_attempts = getattr(pos, "_close_attempts", 0) + 1
+            pos._next_close_retry_at = time.time() + delay_sec
+            _release_pending()
 
         if ctx.condition_id != pos.condition_id:
             logger.warning(
                 "EXIT {} aborted: window switched (pos={} ctx={})",
                 asset, pos.condition_id[:12], ctx.condition_id[:12],
             )
-            _cleanup()
+            _release_pending()
             return
 
         resolved_mkt = ctx.market
@@ -319,19 +366,32 @@ class ExitController:
         elif reason == ExitReason.REASON_SETTLE and settle_up_wins is not None:
             override_exit = 1.0 if settle_up_wins else 0.0
 
+        # 按持仓自身的执行模式决定是否必须使用 LiveTrader。
+        # live 持仓在 LiveTrader 不可用时绝不能降级为 dry 记录。
+        pos_mode = getattr(pos, "execution_mode", "dry")
+        effective_trader = live_trader if pos_mode == "live" else None
+        if pos_mode == "live" and effective_trader is None:
+            logger.error(
+                "EXIT [{}] live position but LiveTrader is unavailable — "
+                "keeping position open and retrying later (condition={})",
+                asset, pos.condition_id[:12],
+            )
+            _schedule_retry(30.0)
+            return
+
         tp_hit = getattr(pos, "tp_hit", None)
         try:
             await self._pos_mgr.close_position(
                 pos,
                 reason,
                 override_exit_price=override_exit,
-                live_trader=live_trader,
+                live_trader=effective_trader,
                 resolved_market=resolved_mkt,
                 settle_up_wins=settle_up_wins,
                 partial_close_pct=partial_close_pct,
             )
             self._record_risk(pos)
-            _cleanup()
+            _finalize()
 
             if tp_hit:
                 pnl_recorded = getattr(pos, "_last_pnl_pct", None)
@@ -352,59 +412,46 @@ class ExitController:
             pos._last_pnl_pct = exc.pnl_pct
             pos._last_pnl_usd = exc.pnl_usd
             self._record_risk(pos)
-            _cleanup()
+            _finalize()
+            return
+
+        except LiveTraderUnavailableError as exc:
+            logger.error("EXIT [{}] {} — keeping position open", asset, exc)
+            _schedule_retry(30.0)
             return
 
         except CLOBExitError as exc:
-            current_retries = getattr(pos, "sell_retry_count", 0) + 1
-            pos.sell_retry_count = current_retries
-            if current_retries >= 3:
+            pos.sell_retry_count = getattr(pos, "sell_retry_count", 0) + 1
+            if pos.sell_retry_count >= 3:
                 logger.error("EXIT [{}] sell exhausted — force settle", asset)
                 try:
                     await self._pos_mgr.close_position(
                         pos, ExitReason.SETTLE_EXHAUSTED,
                         override_exit_price=override_exit,
-                        live_trader=live_trader,
+                        live_trader=effective_trader,
                         resolved_market=resolved_mkt,
                     )
                     self._record_risk(pos)
-                    _cleanup()
+                    _finalize()
                     return
                 except AlreadyClosedError:
                     self._record_risk(pos)
-                    _cleanup()
+                    _finalize()
                     return
                 except Exception as inner_exc:
                     logger.error("EXIT [{}] settle_exhausted failed: {}", asset, inner_exc)
-                    _cleanup()
-                    return
-            logger.warning("EXIT [{}] sell failed ({}/3): {}", asset, current_retries, exc.reason)
-            _cleanup()
+            logger.warning(
+                "EXIT [{}] sell failed ({}/3): {} — keeping position for retry",
+                asset, pos.sell_retry_count, exc.reason,
+            )
+            _schedule_retry(min(60.0, 5.0 * max(pos._close_attempts, 1)))
             return
 
         except asyncio.CancelledError:
-            logger.warning("EXIT [{}] cancelled", asset)
-            _cleanup()
+            logger.warning("EXIT [{}] cancelled — keeping position open", asset)
+            _release_pending()
             raise
 
         except Exception as exc:
-            logger.exception("EXIT [{}] _do_close error: {}", asset, exc)
-            lock = self._exit_retry_locks.setdefault(asset, asyncio.Lock())
-            async with lock:
-                if not getattr(pos, "_exit_retry_done", False):
-                    logger.info("EXIT [{}] retrying once in 2 seconds", asset)
-                    pos._exit_retry_done = True
-                    await asyncio.sleep(2.0)
-                    try:
-                        await self._pos_mgr.close_position(
-                            pos, reason,
-                            override_exit_price=override_exit,
-                            live_trader=live_trader,
-                            resolved_market=resolved_mkt,
-                        )
-                        self._record_risk(pos)
-                        _cleanup()
-                        return
-                    except Exception as retry_exc:
-                        logger.exception("EXIT [{}] retry also failed: {}", asset, retry_exc)
-            _cleanup()
+            logger.exception("EXIT [{}] _do_close error: {} — keeping position for retry", asset, exc)
+            _schedule_retry(5.0)

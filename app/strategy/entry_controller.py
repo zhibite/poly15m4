@@ -152,7 +152,6 @@ class EntryController:
         self._opening_pos_by_asset: dict[str, bool] = {}
         self._retry_mgr = RetryManager(mode="entry")
         self._params = EntryParams()
-        self._prev_live_mode: Optional[bool] = None
 
         # 决策快照：每个 asset 每个 bar 只写一次；记录最近一条的 id 供入场回填
         self._last_snapshot_bar: dict[str, int] = {}
@@ -185,7 +184,6 @@ class EntryController:
         p.base_usdc = float(cfg.get("entry_base_usdc", 4.0))
         p.market_duration_sec = int(float(cfg.get("market_duration_sec", 900)))
         lm = bool(cfg.get("live_mode", False))
-        self._prev_live_mode = lm
         p.live_mode = lm
         p.btc_slippage_pct = float(cfg.get("btc_slippage_pct", 1.0))
         p.eth_slippage_pct = float(cfg.get("eth_slippage_pct", 2.0))
@@ -369,21 +367,11 @@ class EntryController:
 
         # ── Step 1: 调用指标信号服务 ────────────────────────────────────
         svc = self._signal_svc.get(asset, self._signal_svc["BTC"])
-        window_open_price = getattr(mkt, "window_open_up", 0.0) or 0.0
+        # 锚点价必须是窗口开启时的现货价（美元）。此前误用了 window_open_up
+        # （Polymarket 概率价 0~1），导致 anchor_deviation_pct 变成无意义的大数。
+        window_open_price = getattr(mkt, "window_spot_price", 0.0) or 0.0
         if window_open_price <= 0:
-            window_open_price = getattr(mkt, "window_open_down", 0.0) or 0.0
-        if window_open_price <= 0:
-            window_open_price = (
-                ctx.market.window_spot_price
-                if ctx.market and ctx.market.window_spot_price
-                else 0.0
-            )
-        if window_open_price <= 0:
-            window_open_price = (
-                ctx.market.current_spot_price
-                if ctx.market and ctx.market.current_spot_price
-                else 0.0
-            )
+            window_open_price = getattr(mkt, "current_spot_price", 0.0) or 0.0
 
         sig: SignalResult = await svc.get_signal(
             up_mid=up_mid,
@@ -1270,6 +1258,7 @@ class EntryController:
             opened_at=datetime.now(timezone.utc),
             window_start=mkt.window_start,
             window_end=mkt.window_end,
+            execution_mode=mode,
             market=mkt,
         )
 

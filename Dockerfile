@@ -31,5 +31,8 @@ EXPOSE 8019
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+# Container must listen on all interfaces so the published port works.
+ENV HOST=0.0.0.0
+ENV PORT=8019
 
 CMD ["python", "run.py"]

@@ -11,6 +11,7 @@ end_window_strategy.py — 末端顺势策略编排层
 """
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,6 +21,7 @@ from app.models import Side
 from app.strategy.end_window_signal import EndWindowConfidence, compute_confidence, determine_direction
 from app.strategy.end_window_controller import EndWindowController, EndWindowExitSignal
 from app.strategy.models import MarketInfo
+from app.strategy.position_manager import AlreadyClosedError, LiveTraderUnavailableError
 from app.strategy.window_context import WindowContext
 from app.pm_client import PolymarketClient
 
@@ -54,6 +56,10 @@ class EndPosition:
     sell_retry_count: int = 0
     _pending_close: bool = False
     _exit_retry_done: bool = False
+    # 入场时的执行模式（live / dry）与平仓重试状态
+    execution_mode: str = "dry"
+    _close_attempts: int = 0
+    _next_close_retry_at: float = 0.0
     _trade_recorded: bool = False
     _trade_recorded_reason: str = ""
     _last_pnl_pct: float = 0.0
@@ -96,7 +102,31 @@ class EndWindowStrategy:
         self._entry_confidences: dict[str, EndWindowConfidence] = {}
         # 同一窗口只允许入场一次（平仓后也不再入场），值为 condition_id
         self._traded_conditions: dict[str, str] = {}
-        self._live_trader = None             # 每次 tick 由 run_forever 传入
+        # 实际 LiveTrader 引用（由 SinglePositionStrategy.set_live_trader 同步）。
+        # tick() 的 live_trader 参数只表示“本次是否允许实盘入场”，不要覆盖它。
+        self._live_trader = None
+        # 跟踪异步平仓任务，shutdown 时先等待其完成再关闭客户端。
+        self._close_tasks: set[asyncio.Task] = set()
+
+    def _track_close_task(self, task: asyncio.Task) -> None:
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+
+    async def close(self, timeout: float = 10.0) -> None:
+        """Wait for in-flight end-window close tasks before shutdown."""
+        tasks = [t for t in self._close_tasks if not t.done()]
+        if not tasks:
+            return
+        logger.info("Waiting for {} in-flight end-window close task(s)...", len(tasks))
+        _done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                "{} end-window close task(s) did not finish in {:.0f}s — cancelling",
+                len(pending), timeout,
+            )
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ── 参数同步 ─────────────────────────────────────────────────────────────
 
@@ -128,7 +158,10 @@ class EndWindowStrategy:
         if not mkt:
             return False, ""
 
-        self._live_trader = live_trader
+        # NOTE: self._live_trader is the *actual* trader reference (kept in sync by
+        # SinglePositionStrategy.set_live_trader).  The `live_trader` parameter is
+        # the entry permission (None when live_mode=False), so it must not
+        # overwrite the exit-side reference.
         elapsed = ctx.elapsed()
         up_mid = mkt._up_mid
         down_mid = mkt._down_mid
@@ -139,6 +172,10 @@ class EndWindowStrategy:
         # ── 1. 退出检查 ────────────────────────────────────────────────
         if asset in self._positions:
             pos = self._positions[asset]
+            if getattr(pos, "_pending_close", False):
+                return False, ""
+            if time.time() < getattr(pos, "_next_close_retry_at", 0.0):
+                return False, ""
             exit_sig = self.signal.check_exit(
                 elapsed=elapsed,
                 window_duration=market_duration_sec,
@@ -152,7 +189,7 @@ class EndWindowStrategy:
             return False, ""
 
         if not allow_entry:
-            return False, "max_open_positions"
+            return False, "entry_not_allowed"
 
         # ── 2. 入场检查 ────────────────────────────────────────────────
         return await self._check_entry(
@@ -160,6 +197,7 @@ class EndWindowStrategy:
             elapsed, up_mid, down_mid,
             main_has_position, main_direction,
             market_duration_sec=market_duration_sec,
+            entry_live_trader=live_trader,
         )
 
     # ── 入场 ───────────────────────────────────────────────────────────────
@@ -176,6 +214,7 @@ class EndWindowStrategy:
         main_direction: str,
         *,
         market_duration_sec: float = 900.0,
+        entry_live_trader=None,
     ) -> tuple[bool, str]:
         mkt = ctx.market
         if mkt is None:
@@ -243,6 +282,7 @@ class EndWindowStrategy:
         ep = await self._do_entry(
             asset, ctx, direction, entry_price, size,
             orderbook=orderbook, core_agree=core_agree,
+            live_trader=entry_live_trader,
         )
         if ep is None:
             return False, "entry_failed"
@@ -252,7 +292,7 @@ class EndWindowStrategy:
         self._traded_conditions[asset] = mkt.condition_id
         self.signal.set_position(asset, True)
 
-        mode = "LIVE" if self._live_trader else "DRY"
+        mode = "LIVE" if entry_live_trader else "DRY"
         logger.info(
             "END_ENTER [{}][{}] {} @ {:.4f} size={:.2f}U conf={:.1f} {}",
             mode, asset, direction, entry_price, size, conf.total,
@@ -270,6 +310,7 @@ class EndWindowStrategy:
         *,
         orderbook: dict | None = None,
         core_agree: int = 0,
+        live_trader=None,
     ) -> Optional[EndPosition]:
         """执行入场（live 或 dry），并写入 EntryRecord / Fill。"""
         mkt = ctx.market
@@ -281,7 +322,7 @@ class EndWindowStrategy:
 
         # 实盘模式下 LiveTrader 不可用时禁止静默降级为 dry 模拟
         from app.runtime_config import get_config
-        if get_config().get("live_mode", False) and self._live_trader is None:
+        if get_config().get("live_mode", False) and live_trader is None:
             logger.error(
                 "END_ENTRY [{}] live_mode=True but LiveTrader is unavailable — skipping entry",
                 asset,
@@ -296,7 +337,7 @@ class EndWindowStrategy:
                 logger.debug("END_ENTRY fee_rate_bps unavailable for {} — using 0 bps", asset)
 
         # Dry-run 路径
-        if self._live_trader is None:
+        if live_trader is None:
             tokens = stake / price if price > 1e-9 else 0.0
             ep = EndPosition(
                 asset=asset, direction=direction,
@@ -306,6 +347,7 @@ class EndWindowStrategy:
                 stake_usdc=stake, cost_basis=stake,
                 actual_cost_usdc=stake, side=side,
                 bet_usdc=stake, anchor_price=price,
+                execution_mode="dry",
                 entry_core_agree=core_agree,
                 condition_id=mkt.condition_id,
                 opened_at=datetime.now(timezone.utc),
@@ -338,7 +380,7 @@ class EndWindowStrategy:
                     )
 
         try:
-            result = await self._live_trader.buy_token(
+            result = await live_trader.buy_token(
                 token_id=token_id,
                 size_usdc=stake,
                 midpoint=price,
@@ -358,6 +400,7 @@ class EndWindowStrategy:
                     stake_usdc=stake, cost_basis=cost,
                     actual_cost_usdc=cost, side=side,
                     bet_usdc=stake, anchor_price=fill_price,
+                    execution_mode="live",
                     entry_core_agree=core_agree,
                     taker_fee_bps=fee_rate_bps,
                     condition_id=mkt.condition_id,
@@ -444,41 +487,56 @@ class EndWindowStrategy:
         exit_sig: EndWindowExitSignal,
     ) -> tuple[bool, str]:
         """
-        处理退出：直接从 _positions 中弹出持仓，通过 pos_mgr 执行平仓。
+        处理退出：保留持仓在 _positions 中直到平仓成功，避免平仓失败后
+        持仓从内存消失（真实 token 仍留在钱包里）。
 
         不操作 ctx.position，主策略的状态完全不受影响。
         """
-        pos = self._positions.pop(asset, None)
-        self._entry_confidences.pop(asset, None)
-        self.signal.set_position(asset, False)
-
+        pos = self._positions.get(asset)
         if pos is None:
-            return True, f"exited:{exit_sig.reason}"
+            return False, ""
+        if getattr(pos, "_pending_close", False):
+            return False, ""
 
         pnl_pct = exit_sig.pnl_pct
         # 每日亏损控制以 USDC 计，而不是百分比
         pnl_usd = float(pos.actual_cost_usdc) * pnl_pct / 100.0
+        pos._last_pnl_pct = pnl_pct
+        pos._last_pnl_usd = pnl_usd
 
-        # 记录每日盈亏（所有退出类型都记录）
-        self.signal.record_pnl(asset, pnl_usd)
-
-        mode = "LIVE" if self._live_trader else "DRY"
-        reason_tag = f"END_{exit_sig.reason}"
+        # live 持仓必须使用真实 LiveTrader；不可用时保留持仓并稍后重试。
+        close_trader = None
+        if getattr(pos, "execution_mode", "dry") == "live":
+            close_trader = self._live_trader
+            if close_trader is None:
+                logger.error(
+                    "END_EXIT [{}] live position but LiveTrader unavailable — "
+                    "keeping position and retrying (condition={})",
+                    asset, pos.condition_id[:12],
+                )
+                pos._next_close_retry_at = time.time() + 30.0
+                return False, "live_trader_unavailable"
 
         if self._pos_mgr is None:
-            logger.info(
-                "END_EXIT [{}][{}] {} pnl%={:+.1f}% pnl_usd={:+.2f} reason={} (pos_mgr unavailable)",
-                mode, asset, pos.direction, pnl_pct, pnl_usd, exit_sig.reason,
-            )
-            return True, f"exited:{exit_sig.reason}"
+            logger.error("END_EXIT [{}] pos_mgr unavailable — keeping position", asset)
+            return False, "pos_mgr_unavailable"
 
-        # Dry 与 live 都通过 pos_mgr 写 Trade/ExitRecord：
-        # live_trader=None 时 close_position 只按当前中间价记录，不发真实卖单。
+        reason_tag = f"END_{exit_sig.reason}"
         pos._pending_close = True
-        asyncio.create_task(
-            self._do_close(asset, pos, reason_tag, ctx),
-            name=f"end-close-{asset}",
-        )
+        try:
+            task = asyncio.create_task(
+                self._do_close(
+                    asset, pos, reason_tag, pnl_usd, close_trader,
+                    reinsert_on_failure=True,
+                ),
+                name=f"end-close-{asset}",
+            )
+            self._track_close_task(task)
+        except RuntimeError as exc:
+            pos._pending_close = False
+            logger.error("END_EXIT [{}] cannot schedule close: {}", asset, exc)
+            return False, "cannot_schedule_close"
+        mode = "LIVE" if close_trader else "DRY"
         logger.info(
             "END_EXIT [{}][{}] {} pnl%={:+.1f}% pnl_usd={:+.2f} reason={}",
             mode, asset, pos.direction, pnl_pct, pnl_usd, exit_sig.reason,
@@ -490,27 +548,74 @@ class EndWindowStrategy:
         asset: str,
         pos: EndPosition,
         reason: str,
-        ctx: WindowContext | None,
-    ) -> None:
+        pnl_usd: float = 0.0,
+        live_trader=None,
+        *,
+        reinsert_on_failure: bool = True,
+    ) -> bool:
         """
         异步执行末端策略持仓的平仓。
 
         使用 pos_mgr.close_position() 执行，与主策略持仓平仓共用同一套机制
         （CLOB 卖出 → 链上 redeem 兜底 → DB 记录）。
+
+        只有成功（或链上已无余额）才移除持仓并记录每日盈亏；失败时保留
+        持仓并设置冷却时间，由后续 tick 再次尝试退出。
         """
+        success = False
         try:
-            if self._pos_mgr is not None:
-                await self._pos_mgr.close_position(
-                    pos=pos,
-                    close_reason=reason,
-                    live_trader=self._live_trader,
-                    resolved_market=pos.market,
-                )
+            if self._pos_mgr is None:
+                raise RuntimeError("pos_mgr unavailable")
+            await self._pos_mgr.close_position(
+                pos=pos,
+                close_reason=reason,
+                live_trader=live_trader,
+                resolved_market=pos.market,
+            )
+            success = True
+        except AlreadyClosedError as exc:
+            # 链上已无余额，视为平仓完成。
+            success = True
+            if exc.pnl_usd is not None:
+                pnl_usd = float(exc.pnl_usd)
+        except LiveTraderUnavailableError as exc:
+            logger.error(
+                "END_CLOSE [{}] {} — keeping position for retry", asset, exc,
+            )
         except Exception as exc:
-            logger.warning("END_CLOSE [{}] failed: {}", asset, exc)
+            logger.warning(
+                "END_CLOSE [{}] failed: {} — keeping position for retry", asset, exc,
+            )
         finally:
             pos._pending_close = False
+
+        if success:
+            if self._positions.get(asset) is pos:
+                self._positions.pop(asset, None)
+            self._entry_confidences.pop(asset, None)
+            self.signal.set_position(asset, False)
+            # Prefer the actual realized PnL written by PositionManager; the
+            # exit-signal estimate is only a fallback (e.g. already-closed).
+            actual_pnl = float(getattr(pos, "_last_pnl_usd", pnl_usd) or pnl_usd)
+            self.signal.record_pnl(asset, actual_pnl)
             pos.sell_retry_count = 0
+            pos._close_attempts = 0
+            pos._next_close_retry_at = 0.0
+        else:
+            pos._close_attempts = getattr(pos, "_close_attempts", 0) + 1
+            pos._next_close_retry_at = time.time() + min(
+                60.0, 5.0 * pos._close_attempts,
+            )
+            if reinsert_on_failure and asset not in self._positions:
+                self._positions[asset] = pos
+                self.signal.set_position(asset, True)
+            elif not reinsert_on_failure:
+                logger.error(
+                    "END_RESET [{}] close failed after window switch — "
+                    "manual redeem may be required (condition_id={}, tokens={:.4f})",
+                    asset, pos.condition_id[:12], pos.tokens_bought,
+                )
+        return success
 
     # ── PnL 计算 ─────────────────────────────────────────────────────────
 
@@ -548,12 +653,33 @@ class EndWindowStrategy:
             )
             return
 
+        # live 持仓必须使用真实 LiveTrader；不可用时只能告警（token 仍在钱包）。
+        close_trader = None
+        if getattr(popped, "execution_mode", "dry") == "live":
+            close_trader = self._live_trader
+            if close_trader is None:
+                logger.error(
+                    "END_RESET [{}] live position but LiveTrader unavailable — "
+                    "manual redeem may be required (condition_id={}, tokens={:.4f})",
+                    asset, popped.condition_id[:12], popped.tokens_bought,
+                )
+                return
+
+        up_mid = popped.market._up_mid if popped.market else 0.5
+        down_mid = popped.market._down_mid if popped.market else 0.5
+        pnl_pct = self._calc_pnl_pct(popped, up_mid, down_mid)
+        pnl_usd = float(popped.actual_cost_usdc) * pnl_pct / 100.0
+
         popped._pending_close = True
         try:
-            asyncio.create_task(
-                self._do_close(asset, popped, "END_WINDOW_SWITCH", None),
+            task = asyncio.create_task(
+                self._do_close(
+                    asset, popped, "END_WINDOW_SWITCH", pnl_usd, close_trader,
+                    reinsert_on_failure=False,
+                ),
                 name=f"end-close-{asset}-reset",
             )
+            self._track_close_task(task)
         except RuntimeError as exc:
             popped._pending_close = False
             logger.error("END_RESET [{}] — cannot schedule close (no running loop): {}", asset, exc)

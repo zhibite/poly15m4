@@ -79,7 +79,8 @@ _runtime: dict = {
     "market_interval_slug":            _slug_initial(),
     "market_duration_sec":             _duration_initial(),
     "asset_btc_enabled":              _env_bool("ASSET_BTC_ENABLED", settings.trade_asset_btc),
-    "asset_eth_enabled":              _env_bool("ASSET_ETH_ENABLED", True),
+    # Default must match config.py / .env.example: ETH is opt-in.
+    "asset_eth_enabled":              _env_bool("ASSET_ETH_ENABLED", settings.trade_asset_eth),
 
     # 单持仓首单金额
     "entry_base_usdc":               float(_env("ENTRY_BASE_USDC", str(settings.entry_base_usdc))),

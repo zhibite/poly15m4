@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
@@ -21,8 +22,15 @@ class Settings(BaseSettings):
     jwt_secret_key: str = ""  # MUST be set via environment variable, NOT in .env file
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
+    # 可选：首次创建用户时要求提供的一次性初始化口令。
+    # 为空时保持旧行为（首个注册用户自动成为 admin）。
+    setup_token: str = ""
 
-    db_url: str = f"sqlite+aiosqlite:///data/polymarket.db"
+    # Accept both DATABASE_URL (documented/docker) and DB_URL (legacy field name).
+    db_url: str = Field(
+        default="sqlite+aiosqlite:///data/polymarket.db",
+        validation_alias=AliasChoices("DATABASE_URL", "DB_URL"),
+    )
 
     assets: str = "BTC"
 

@@ -50,6 +50,17 @@ class AlreadyClosedError(Exception):
         self.pnl_usd = pnl_usd
 
 
+class LiveTraderUnavailableError(Exception):
+    """
+    Raised when a position entered in live mode must be closed, but no LiveTrader
+    is currently available.  Callers must keep the position open and retry later —
+    silently recording it as a dry close would leave real tokens unsold.
+    """
+    def __init__(self, asset: str):
+        super().__init__(f"live trader unavailable while closing {asset}")
+        self.asset = asset
+
+
 @dataclass
 class SellOutcome:
     """单次 sell_token 或 redeem 的结果"""
@@ -160,10 +171,12 @@ class PositionManager:
         """
         mkt = resolved_market if resolved_market is not None else pos.market
         if mkt is not None:
-            # 优先用 tick() 时已缓存的实时价格
-            cached_up = getattr(mkt, "_up_mid", None)
-            cached_down = getattr(mkt, "_down_mid", None)
-            if cached_up is not None and cached_down is not None:
+            # 优先用 tick() 时已缓存的实时价格。
+            # NOTE: _up_mid/_down_mid 的默认值是 0.0（不是 None），所以必须
+            # 显式检查 > 0，否则会在价格尚未刷新时直接返回 0.0。
+            cached_up = getattr(mkt, "_up_mid", 0.0) or 0.0
+            cached_down = getattr(mkt, "_down_mid", 0.0) or 0.0
+            if cached_up > 0 and cached_down > 0:
                 return cached_up if pos.side == Side.UP else cached_down
             # 否则从 API 拉取
             up, down = await self._fetch_prices(mkt)
@@ -564,6 +577,18 @@ class PositionManager:
         # Always reset to 1.0 (full close) on new close call; override only for partial.
         pos._pending_partial_pct = partial_close_pct if partial_close_pct is not None else 1.0
 
+        # ── Execution-mode guard ──────────────────────────────────────────
+        # The position's own entry mode is authoritative.  A live position must
+        # never be recorded as a dry close (which would strand real tokens in the
+        # wallet), and a dry position must never send a real sell order even if a
+        # caller passes a LiveTrader reference.
+        pos_mode = getattr(pos, "execution_mode", "dry")
+        if pos_mode == "live":
+            if live_trader is None:
+                raise LiveTraderUnavailableError(pos.asset)
+        else:
+            live_trader = None
+
         # ── skip_record 路径：仅清理链上余额 ────────────────────────────────
         if skip_record:
             if live_trader is not None:
@@ -947,7 +972,9 @@ class PositionManager:
         from app.database import async_session
         from app.models import EntryRecord, ExitRecord, Fill, Trade
 
-        is_live = get_config().get("live_mode", False)
+        mode = getattr(pos, "execution_mode", "") or (
+            "live" if get_config().get("live_mode", False) else "dry"
+        )
         now = closed_at_override if closed_at_override is not None else datetime.now(timezone.utc)
         partial_pct = pos._pending_partial_pct
 
@@ -974,7 +1001,7 @@ class PositionManager:
                 pnl_usd=pnl_usd,
                 entry_record_id=pos.entry_record_id or None,
                 close_reason=close_reason,
-                mode="live" if is_live else "dry",
+                mode=mode,
                 closed_at=now,
             )
             db.add(exit_record)
@@ -993,7 +1020,7 @@ class PositionManager:
                 pnl_usd=pnl_usd,
                 close_reason=close_reason,
                 bet_usdc=pos.actual_cost_usdc,
-                mode="live" if is_live else "dry",
+                mode=mode,
                 fills=actual_fills,
                 strategy="end" if (close_reason or "").startswith("END_") else "main",
                 entry_core_agree=int(getattr(pos, "entry_core_agree", 0) or 0),

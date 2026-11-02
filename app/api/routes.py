@@ -407,11 +407,25 @@ async def wallet_balance(request: Request):
         )
         from app.config import settings as cfg
 
-        pusd_raw = polygon_pusd_balance_micro(holder=chain_addr, rpc_url=cfg.polygon_rpc_url)
+        # polygon_usdc uses the synchronous httpx/web3 clients; run the RPC calls
+        # in a worker thread so a slow Polygon node cannot block the event loop
+        # (and therefore the strategy tick).
+        pusd_raw, usdc_raw = await asyncio.gather(
+            asyncio.to_thread(
+                polygon_pusd_balance_micro,
+                holder=chain_addr,
+                rpc_url=cfg.polygon_rpc_url,
+            ),
+            asyncio.to_thread(
+                _erc20_balance_raw,
+                chain_addr,
+                POLYGON_USDC_NATIVE,
+                cfg.polygon_rpc_url or "",
+            ),
+        )
         if pusd_raw is not None:
             chain_pusd = pusd_raw / 1_000_000
 
-        usdc_raw = _erc20_balance_raw(chain_addr, POLYGON_USDC_NATIVE, cfg.polygon_rpc_url or "")
         if usdc_raw is not None and usdc_raw > 0:
             chain_usdc = usdc_raw / 1_000_000
     except Exception as exc:

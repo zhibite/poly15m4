@@ -78,6 +78,12 @@ class OpenPosition:
     _is_orphan_position: bool = False
     # 关联的 EntryRecord ID（入场时写入，便于出场时关联）；None 表示未关联
     entry_record_id: int | None = None
+    # 入场时的执行模式（live / dry）。平仓必须按持仓自身模式执行：
+    # live 持仓即使 live_mode 已是 False，也不能静默按 dry 记录。
+    execution_mode: str = "dry"
+    # 平仓重试状态：失败后保留持仓，稍后由主循环重试，而不是直接丢弃。
+    _close_attempts: int = 0
+    _next_close_retry_at: float = 0.0
     # 当前待平仓比例（0.0~1.0），由 close_position 写入，_record_trade 读取
     _pending_partial_pct: float = 1.0
     # ── 平仓记录保护（防止重复记录）────────────────────────────────

@@ -37,33 +37,86 @@ class MarketService:
         self._window_sec = window_sec if window_sec > 0 else default_w
         # Cache neg_risk per condition_id — neg_risk is immutable within a window lifecycle
         self._neg_risk_cache: dict[str, bool] = {}
+        # Discovery cache: asset -> (slot_start_epoch, MarketInfo).
+        # Game markets are immutable within a slot, so we only query Gamma once
+        # per window instead of every strategy tick.
+        self._discovery_cache: dict[str, tuple[int, MarketInfo]] = {}
+        # Shared client for Binance spot-price lookups (avoid one client per tick).
+        self._spot_client: httpx.AsyncClient | None = None
 
     def update_interval(self, slug_interval: str, window_sec: int):
         dslug = PolymarketClient.DEFAULT_UPDOWN_INTERVAL_SLUG
         default_w = PolymarketClient.DEFAULT_UPDOWN_WINDOW_SEC
-        self._slug_interval = slug_interval or dslug
-        self._window_sec = window_sec if window_sec > 0 else default_w
+        new_slug = slug_interval or dslug
+        new_window = window_sec if window_sec > 0 else default_w
+        # Only invalidate when the interval actually changed — this method is
+        # called on every strategy tick by _sync_config().
+        if new_slug != self._slug_interval or new_window != self._window_sec:
+            self._discovery_cache.clear()
+        self._slug_interval = new_slug
+        self._window_sec = new_window
 
     def clear_neg_risk_cache(self, condition_id: str | None = None) -> None:
         """
-        Clear neg_risk cache entries.
+        Clear neg_risk / discovery cache entries.
         If condition_id is provided, only that entry is removed.
         If None, the entire cache is cleared.
         """
         if condition_id is not None:
             self._neg_risk_cache.pop(condition_id, None)
+            for asset, (_slot, mkt) in list(self._discovery_cache.items()):
+                if mkt.condition_id == condition_id:
+                    self._discovery_cache.pop(asset, None)
         else:
             self._neg_risk_cache.clear()
+            self._discovery_cache.clear()
+
+    def clear_discovery_cache(self, asset: str | None = None) -> None:
+        if asset is None:
+            self._discovery_cache.clear()
+        else:
+            self._discovery_cache.pop(asset, None)
+
+    def _get_spot_client(self) -> httpx.AsyncClient:
+        client = self._spot_client
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=5.0,
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+            )
+            self._spot_client = client
+        return client
+
+    async def close(self) -> None:
+        if self._spot_client is not None and not self._spot_client.is_closed:
+            await self._spot_client.aclose()
+        self._spot_client = None
 
     async def discover_market(self, asset: str) -> Optional[MarketInfo]:
-        """发现当前还未结束的市场，返回 MarketInfo 或 None."""
+        """发现当前还未结束的市场，返回 MarketInfo 或 None.
+
+        Results are cached per asset for the duration of one window slot, so the
+        strategy loop does not hit Gamma + two midpoint endpoints every second.
+        """
+        now = datetime.now(timezone.utc)
+        window_sec = self._window_sec if self._window_sec > 0 else 900
+        slot = int(now.timestamp()) // window_sec * window_sec
+        cached = self._discovery_cache.get(asset)
+        if cached is not None and cached[0] == slot:
+            if cached[1].window_end > now:
+                return cached[1]
+            # Defensive: never serve an already-expired cached market.
+            self._discovery_cache.pop(asset, None)
+
         markets = await self._pm.get_asset_updown_markets(
             asset,
             slug_interval=self._slug_interval,
             window_sec=self._window_sec,
             limit=3,
         )
+        # Slot may have rolled over while the HTTP request was in flight.
         now = datetime.now(timezone.utc)
+        slot = int(now.timestamp()) // window_sec * window_sec
         for m in markets:
             end_dt = parse_window_end(m)
             if end_dt is None:
@@ -87,6 +140,11 @@ class MarketService:
                 window_start = datetime.fromtimestamp(
                     window_end.timestamp() - self._window_sec, tz=timezone.utc,
                 )
+            # Do not switch to a future window before the current one is indexed;
+            # the cached discovery entry would otherwise pin the wrong market for
+            # the whole slot.
+            if window_start > now:
+                continue
             condition_id = m.get("conditionId", "")
             neg_risk = self._neg_risk_cache.get(condition_id, None)
             if neg_risk is None:
@@ -119,7 +177,7 @@ class MarketService:
                     condition_id[:12], tokens[1].get("token_id", "")[:12], exc_dn,
                 )
 
-            return MarketInfo(
+            market_info = MarketInfo(
                 asset=asset,
                 condition_id=m.get("conditionId", ""),
                 token_up_id=tokens[0].get("token_id", ""),
@@ -131,6 +189,8 @@ class MarketService:
                 window_open_down=window_open_down,
                 window_spot_price=await self.fetch_spot_price(asset),
             )
+            self._discovery_cache[asset] = (slot, market_info)
+            return market_info
         return None
 
     async def fetch_prices(self, market: MarketInfo | None, asset: str = "") -> tuple[float, float]:
@@ -171,14 +231,13 @@ class MarketService:
         if not symbol:
             return 0.0
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    "https://api.binance.com/api/v3/ticker/price",
-                    params={"symbol": symbol},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return float(data.get("price", 0.0))
+            resp = await self._get_spot_client().get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": symbol},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return float(data.get("price", 0.0))
         except Exception as exc:
             logger.debug("fetch_spot_price {} failed: {}", symbol, exc)
             return 0.0

@@ -50,7 +50,11 @@ def verify_token(token: str) -> dict | None:
 def _extract_token(request: Request) -> str | None:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:]
+        token = auth[7:].strip()
+        if token:
+            return token
+    # Fall back to the HttpOnly cookie when no Bearer token was supplied
+    # (including the case of an empty "Authorization: Bearer " header).
     return request.cookies.get(_COOKIE_NAME)
 
 

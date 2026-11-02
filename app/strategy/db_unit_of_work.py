@@ -8,15 +8,16 @@ db_unit_of_work.py — 统一数据库事务上下文管理器
 3. 异常时统一日志记录
 
 使用方式：
-    await db_transaction(
+    async with db_transaction(
         db_session,
-        fill_ops=[...],
-        rollback_on_error=lambda: rollback_memory_state(),
-    )
+        on_rollback=lambda exc: rollback_memory_state(),
+    ):
+        db.add(fill)
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from loguru import logger
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+@asynccontextmanager
 async def db_transaction(
     db: "AsyncSession",
     *,
