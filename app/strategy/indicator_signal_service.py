@@ -132,6 +132,22 @@ class CoreSignals:
             and s.direction != primary
         )
 
+    @property
+    def trend_signals(self) -> list["IndicatorSignal"]:
+        """趋势组：MACD / VWAP / EMA（Pivot、BBands 与之高度相关，不计入）。"""
+        return [self.macd, self.vwap, self.ema]
+
+    @property
+    def trend_agree(self) -> int:
+        """趋势组中与主方向一致的确认信号数量（0~3）。"""
+        primary = self.primary_direction
+        if primary == SignalDir.SKIP:
+            return 0
+        return sum(
+            1 for s in self.trend_signals
+            if s.agree and s.direction == primary
+        )
+
 
 @dataclass
 class AdvancedFilters:
@@ -177,6 +193,7 @@ class SignalResult:
     # 综合共识
     core_agree: int             # Core 指标中与主方向一致的数量（方向对齐）
     core_contradict: int = 0    # Core 指标中与主方向相反的数量
+    core_trend_agree: int = 0   # 趋势组（MACD/VWAP/EMA）中与主方向一致的数量
     advanced_confirm: bool = False       # Advanced 5 是否确认主方向
     bar_ts: int = 0             # 信号对应的最后一根已收盘 K 线时间（epoch 秒）
 
@@ -1123,6 +1140,7 @@ class IndicatorSignalService:
             advanced=advanced,
             core_agree=core_agree,
             core_contradict=core_contradict,
+            core_trend_agree=core.trend_agree,
             advanced_confirm=advanced_confirm,
             bar_ts=bar_ts,
             suggested_position_pct=1.0,

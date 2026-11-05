@@ -44,11 +44,11 @@
 
 | 参数 | 说明 |
 |---|---|
-| `STAKE_MULT_CORE3` ~ `STAKE_MULT_CORE6` | 按 Core 共识数量配置仓位倍数 |
+| `STAKE_USDC_CORE3` ~ `STAKE_USDC_CORE6` | 按 Core 共识桶直接配置入场金额（USDC）；0 = 跳过该桶 |
 | `USE_KELLY_SIZING` | true = 用历史胜率 + 分数 Kelly 计算仓位（默认关闭） |
 | `KELLY_FRACTION` | Kelly 折扣（默认 0.25） |
 | `KELLY_PRIOR_WEIGHT` | 市场隐含概率先验权重（收缩小样本） |
-| `KELLY_MIN_SAMPLES` | 少于此样本数回退到 Core 倍数 |
+| `KELLY_MIN_SAMPLES` | 少于此样本数回退到 Core 共识金额 |
 | `KELLY_MAX_MULT` | Kelly 仓位相对 `ENTRY_BASE_USDC` 的最大倍数 |
 | `BANKROLL_USDC` | Kelly 计算使用的账户资金 |
 | `MAIN_MAX_DAILY_LOSS_USDC` | 主策略每日已实现亏损上限（负值） |
@@ -138,3 +138,57 @@ GET /api/analysis/decisions?only_entered=true
 本次提供的是「实盘/干跑数据的表现基线 + 决策快照」。严格的历史 tick 级回测还需要
 Polymarket CLOB 的 token 价格历史/盘口快照；当前仓库没有接入这部分数据源。
 建议先用真实运行数据积累样本，再决定是否投入完整回测引擎。
+
+## 7. 数据驱动优化（2026-11）
+
+基于 111 笔已入场决策快照的归因结果：
+
+| 指标 | 同向且确认 | 胜率 | 盈亏 |
+|---|---|---|---|
+| RSI | 2 | 0% | -0.56U |
+| MACD | 93 | 45.2% | -4.70U |
+| VWAP | 63 | 46.0% | -1.98U |
+| EMA | 29 | 41.4% | -2.26U |
+| Pivot | 107 | 43.9% | -5.97U |
+| BBands | 74 | 43.2% | -5.93U |
+
+结论：Pivot/BBands 几乎每次入场都同向，Core 共识更像「相关指标重复投票」；
+Core 4/6（34% 胜率，-5.19U）却拿到了全仓；Advanced REDUCE 组整体为负。
+
+对应改动（全部可通过 `/api/config` 热更新）：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `STAKE_USDC_CORE3` / `STAKE_USDC_CORE4` | `2.0` | 3/6、4/6 直接 2U；设为 0 可跳过该桶 |
+| `STAKE_USDC_CORE5` / `STAKE_USDC_CORE6` | `4.0` | 5/6、6/6 直接 4U |
+| `CORE_TREND_MIN_AGREE` | `2` | MACD/VWAP/EMA 至少 2 个确认；防止 Pivot/BBands 凑共识 |
+| `ADVANCED_REDUCE_ACTION` | `skip` | REDUCE 直接跳过；设 `reduce` 回到减半 |
+| `ENTRY_PRICE_HIGH_THRESHOLD` | `0.50` | 高价减仓阈值 |
+| `STAKE_MULT_HIGH_PRICE` | `0.5` | 入场价 ≥0.50 时在共识金额上再减半 |
+| `FACTOR_MODE` | `1` | 默认 shadow，只记录因子，不影响交易 |
+
+> 旧的 `STAKE_MULT_CORE3` ~ `STAKE_MULT_CORE6` 已废弃，升级后改用 `STAKE_USDC_CORE*`。
+> Core 模式不再使用 `ENTRY_BASE_USDC`；该值只用于 Kelly / 因子模式的基准。
+> 当前金额为两档：3/6、4/6 → 2U；5/6、6/6 → 4U。若想让 4/6 继续跳过，设
+> `STAKE_USDC_CORE4=0`。
+
+### 规则回放
+
+新增 `GET /api/analysis/attribution?days=30&trend_quorum=2`，只统计 `entered=1`
+的决策快照并关联真实 Trade PnL，返回：
+
+- `by_indicator`：每个 Core 指标同向/不同向时的胜率和 PnL
+- `by_core_agree` / `by_advanced_filter` / `by_price_bucket` / `by_trend_agree`
+- `what_if`：`skip_core4`、`skip_advanced_reduce`、`trend_quorum_2`、
+  `price_le_050`、`recommended`、`recommended_high_price_half` 的假设结果
+  （基于历史 PnL 按仓位线性缩放）
+
+### 建议的 A/B 顺序
+
+1. 先只开 `CORE_TREND_MIN_AGREE=2`（最小改动），观察 2~3 天成交量和 EV。
+2. 再调整共识桶金额：例如把 `STAKE_USDC_CORE4=0` 跳过 4/6，确认该桶是否确实拖累。
+3. 再开 `ADVANCED_REDUCE_ACTION=skip`。
+4. 最后用 `STAKE_MULT_HIGH_PRICE=0.5` 做高价减仓 A/B。
+5. 每轮至少积累 30~50 笔再判断，避免在小样本上过拟合。
+6. 同时保持 `FACTOR_MODE=1` 收集因子 IC；当 `price` / `micro` 因子 IC 稳定为正后，
+   再考虑 `FACTOR_MODE=2`。

@@ -82,9 +82,12 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     "core_agree_threshold": (2.0, 6.0),
     "core_agree_standard": (2.0, 6.0),
     "core_contradict_limit": (0.0, 6.0),
+    "core_trend_min_agree": (0.0, 3.0),
     "entry_price_alignment_min_dev": (0.0, 0.50),
     "entry_price_min": (0.01, 0.95),
     "entry_price_max": (0.05, 0.70),
+    "entry_price_high_threshold": (0.05, 0.95),
+    "stake_mult_high_price": (0.0, 2.0),
 
     # 流动性与信号阈值
     "min_depth_coverage": (0.5, 20.0),
@@ -92,11 +95,11 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     "obi_contradict_skip": (0.0, 1.0),
     "oi_change_significant": (0.001, 0.50),
 
-    # 按 Core 共识数量配置仓位倍数
-    "stake_mult_core3": (0.0, 5.0),
-    "stake_mult_core4": (0.0, 5.0),
-    "stake_mult_core5": (0.0, 5.0),
-    "stake_mult_core6": (0.0, 5.0),
+    # 按 Core 共识桶直接配置入场金额（USDC）；0 = 跳过该桶
+    "stake_usdc_core3": (0.0, 10000.0),
+    "stake_usdc_core4": (0.0, 10000.0),
+    "stake_usdc_core5": (0.0, 10000.0),
+    "stake_usdc_core6": (0.0, 10000.0),
 
     # 分数 Kelly
     "kelly_fraction": (0.0, 1.0),
@@ -157,6 +160,11 @@ _BOOL_KEYS_BODY = frozenset(
     }
 )
 
+# 字符串枚举配置：只接受固定取值，避免拼写错误导致策略行为不可预期
+_STRING_ENUM_KEYS: dict[str, set[str]] = {
+    "advanced_reduce_action": {"skip", "reduce"},
+}
+
 
 @router.get("/config")
 async def api_get_config():
@@ -188,6 +196,16 @@ async def api_update_config(body: dict[str, Any], request: Request):
             continue
         if k in _BOOL_KEYS_BODY:
             continue
+        if k in _STRING_ENUM_KEYS:
+            val = str(v).strip().lower()
+            if val not in _STRING_ENUM_KEYS[k]:
+                allowed = ", ".join(sorted(_STRING_ENUM_KEYS[k]))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{k} must be one of: {allowed}",
+                )
+            patch[k] = val
+            continue
         if k not in _CONFIG_BOUNDS:
             continue
         lo, hi = _CONFIG_BOUNDS[k]
@@ -197,7 +215,8 @@ async def api_update_config(body: dict[str, Any], request: Request):
         try:
             if k in (
                 "core_agree_threshold", "core_agree_standard",
-                "core_contradict_limit", "main_max_consecutive_losses",
+                "core_contradict_limit", "core_trend_min_agree",
+                "main_max_consecutive_losses",
                 "main_loss_cooldown_sec", "max_open_positions_total",
                 "kelly_min_samples", "factor_mode",
             ):
@@ -208,7 +227,8 @@ async def api_update_config(body: dict[str, Any], request: Request):
             raise HTTPException(status_code=400, detail=f"Invalid value for {k}") from None
         if k in (
             "core_agree_threshold", "core_agree_standard",
-            "core_contradict_limit", "main_max_consecutive_losses",
+            "core_contradict_limit", "core_trend_min_agree",
+            "main_max_consecutive_losses",
             "main_loss_cooldown_sec", "max_open_positions_total",
             "kelly_min_samples", "factor_mode",
         ):

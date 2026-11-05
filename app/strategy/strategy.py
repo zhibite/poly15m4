@@ -654,6 +654,14 @@ class SinglePositionStrategy:
             "entry": {
                 "base_usdc": self.entry_base_usdc,
                 "core_agree_threshold": self.core_agree_threshold,
+                "core_trend_min_agree": int(float(cfg.get("core_trend_min_agree", 2))),
+                "advanced_reduce_action": str(cfg.get("advanced_reduce_action", "skip")),
+                "stake_usdc_core3": float(cfg.get("stake_usdc_core3", 2.0)),
+                "stake_usdc_core4": float(cfg.get("stake_usdc_core4", 2.0)),
+                "stake_usdc_core5": float(cfg.get("stake_usdc_core5", 4.0)),
+                "stake_usdc_core6": float(cfg.get("stake_usdc_core6", 4.0)),
+                "entry_price_high_threshold": float(cfg.get("entry_price_high_threshold", 0.50)),
+                "stake_mult_high_price": float(cfg.get("stake_mult_high_price", 0.5)),
             },
             "exit": {
                 "fixed_stop_loss_pct": self.signal_fixed_stop_loss_pct,

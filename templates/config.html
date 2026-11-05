@@ -242,17 +242,17 @@
       <div class="field">
         <label>基准仓位 (USDC)</label>
         <input type="number" id="entry_base_usdc" step="0.5" min="1.0" max="100" value="4">
-        <span class="hint">5/6 → 1.5×，6/6 → 2×，最多 100U，默认 4U</span>
-      </div>
-      <div class="field">
-        <label>Core 6 全仓门槛</label>
-        <input type="number" id="core_agree_threshold" step="1" min="2" max="6">
-        <span class="hint">≥ 此值时全仓（4=1×，5=1.5×，6=2×），默认 4</span>
+        <span class="hint">Core 模式不再使用；仅用于 Kelly / 因子模式</span>
       </div>
       <div class="field">
         <label>Core 6 入场门槛</label>
+        <input type="number" id="core_agree_threshold" step="1" min="2" max="6">
+        <span class="hint">Core 同向共识 ≥ 此值才入场（默认 3）</span>
+      </div>
+      <div class="field">
+        <label>Core 标准门槛（保留）</label>
         <input type="number" id="core_agree_standard" step="1" min="2" max="6">
-        <span class="hint">≥ 此值时可入场（3=0.5×），默认 3</span>
+        <span class="hint">兼容旧配置，当前入场逻辑使用上一个门槛</span>
       </div>
       <div class="field">
         <label>入场起始 (秒)</label>
@@ -275,6 +275,57 @@
         <label>入场价格上限</label>
         <input type="number" id="entry_price_max" step="0.01" min="0.01" max="0.99">
         <span class="hint">UP/DOWN 价格高于此值时跳过，默认 0.60</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>趋势组法定人数</label>
+        <input type="number" id="core_trend_min_agree" step="1" min="0" max="3">
+        <span class="hint">MACD/VWAP/EMA 至少 N 个同向确认（默认 2，0=关闭）</span>
+      </div>
+      <div class="field">
+        <label>Advanced REDUCE 处理</label>
+        <select id="advanced_reduce_action">
+          <option value="skip">直接跳过（默认）</option>
+          <option value="reduce">仓位减半</option>
+        </select>
+        <span class="hint">Funding 极端 / OBI 反向时的处理方式</span>
+      </div>
+      <div class="field">
+        <label>高价减仓阈值</label>
+        <input type="number" id="entry_price_high_threshold" step="0.01" min="0.05" max="0.95">
+        <span class="hint">入场价 ≥ 此值时仓位乘以系数（默认 0.50）</span>
+      </div>
+    </div>
+    <div class="row row3">
+      <div class="field">
+        <label>高价仓位系数</label>
+        <input type="number" id="stake_mult_high_price" step="0.1" min="0" max="2">
+        <span class="hint">默认 0.5：在共识金额基础上再减半</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Core 3/6 入场金额 (USDC)</label>
+        <input type="number" id="stake_usdc_core3" step="0.5" min="0" max="10000">
+        <span class="hint">默认 2U；0 = 跳过该共识桶</span>
+      </div>
+      <div class="field">
+        <label>Core 4/6 入场金额 (USDC)</label>
+        <input type="number" id="stake_usdc_core4" step="0.5" min="0" max="10000">
+        <span class="hint">默认 2U；0 = 跳过该共识桶</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Core 5/6 入场金额 (USDC)</label>
+        <input type="number" id="stake_usdc_core5" step="0.5" min="0" max="10000">
+        <span class="hint">默认 4U；0 = 跳过该共识桶</span>
+      </div>
+      <div class="field">
+        <label>Core 6/6 入场金额 (USDC)</label>
+        <input type="number" id="stake_usdc_core6" step="0.5" min="0" max="10000">
+        <span class="hint">默认 4U；0 = 跳过该共识桶</span>
       </div>
     </div>
   </div>
@@ -597,8 +648,11 @@ async function saveConfig() {
     'addon_late_cutoff_elapsed_sec', 'addon_spot_deviation_pct',
     'min_exit_price',
     'entry_late_cutoff_elapsed_sec',
-    'core_agree_threshold', 'core_agree_standard',
+    'core_agree_threshold', 'core_agree_standard', 'core_trend_min_agree',
+    'stake_usdc_core3', 'stake_usdc_core4', 'stake_usdc_core5', 'stake_usdc_core6',
+    'advanced_reduce_action',
     'entry_price_min', 'entry_price_max',
+    'entry_price_high_threshold', 'stake_mult_high_price',
     'live_slippage_pct',
     'btc_slippage_pct', 'eth_slippage_pct',
     'settle_grace_sec', 'max_settle_wait_sec',
@@ -615,6 +669,7 @@ async function saveConfig() {
     if (!el) { console.warn('missing field:', k); continue; }
     if (el.value === '' || el.value === null) continue; // 空值不提交，后端使用默认值
     if (k === 'market_interval_slug') { body[k] = String(el.value).trim().toLowerCase().replace('/', ''); continue; }
+    if (k === 'advanced_reduce_action') { body[k] = String(el.value).trim().toLowerCase(); continue; }
     if (k === 'martingale_max_adds') { if (el.value !== '') body[k] = parseInt(el.value, 10); continue; }
     body[k] = parseFloat(el.value);
   }

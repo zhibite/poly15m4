@@ -59,6 +59,12 @@ def _env_bool(key: str, settings_fallback: bool) -> bool:
     return bool(settings_fallback)
 
 
+def _env_choice(key: str, default: str, allowed: tuple[str, ...]) -> str:
+    """读取字符串枚举；非法值回退默认值，避免拼写错误改变策略行为。"""
+    val = _env(key, default).strip().lower()
+    return val if val in allowed else default
+
+
 def _slug_initial() -> str:
     slug = _env("MARKET_INTERVAL_SLUG", settings.market_interval_slug).strip().lower().replace("/", "")
     return slug if slug else "15m"
@@ -110,12 +116,25 @@ _runtime: dict = {
     "core_agree_threshold":           int(float(_env("CORE_AGREE_THRESHOLD", "3"))),
     "core_agree_standard":           int(float(_env("CORE_AGREE_STANDARD", "3"))),
     "core_contradict_limit":         int(float(_env("CORE_CONTRADICT_LIMIT", "1"))),
+    # 趋势组法定人数：MACD / VWAP / EMA 至少有多少个同向确认。
+    # Pivot/BBands 与趋势高度相关，单独投票几乎不起筛选作用；
+    # 该门槛保证核心共识里至少包含真实趋势证据。
+    "core_trend_min_agree":          int(float(_env("CORE_TREND_MIN_AGREE", "2"))),
     "entry_require_price_alignment": _env_bool("ENTRY_REQUIRE_PRICE_ALIGNMENT", False),
     "entry_price_alignment_min_dev": float(_env("ENTRY_PRICE_ALIGNMENT_MIN_DEV", "0.02")),
-    "stake_mult_core3":              float(_env("STAKE_MULT_CORE3", "0.5")),
-    "stake_mult_core4":              float(_env("STAKE_MULT_CORE4", "1.0")),
-    "stake_mult_core5":              float(_env("STAKE_MULT_CORE5", "1.5")),
-    "stake_mult_core6":              float(_env("STAKE_MULT_CORE6", "2.0")),
+    # 按 Core 共识数量直接配置入场金额（USDC），不再使用 base × 倍数。
+    # 默认两档：3/6、4/6 → 2U；5/6、6/6 → 4U。设为 0 表示跳过该共识桶。
+    "stake_usdc_core3":              float(_env("STAKE_USDC_CORE3", "2.0")),
+    "stake_usdc_core4":              float(_env("STAKE_USDC_CORE4", "2.0")),
+    "stake_usdc_core5":              float(_env("STAKE_USDC_CORE5", "4.0")),
+    "stake_usdc_core6":              float(_env("STAKE_USDC_CORE6", "4.0")),
+    # Advanced REDUCE 的处理方式：skip = 直接跳过；reduce = 仓位减半
+    "advanced_reduce_action":        _env_choice(
+        "ADVANCED_REDUCE_ACTION", "skip", ("skip", "reduce")
+    ),
+    # 高价减仓：入场价 >= 阈值时仓位乘以系数（0.50~0.60 为历史主要亏损区）
+    "entry_price_high_threshold":    float(_env("ENTRY_PRICE_HIGH_THRESHOLD", "0.50")),
+    "stake_mult_high_price":         float(_env("STAKE_MULT_HIGH_PRICE", "0.5")),
 
     # 可选：历史胜率 + 分数 Kelly 仓位
     "use_kelly_sizing":              _env_bool("USE_KELLY_SIZING", False),
@@ -127,7 +146,8 @@ _runtime: dict = {
 
     # ── 因子模型 ────────────────────────────────────────────────────
     # 0=off, 1=shadow（只记录）, 2=live（用因子决策）
-    "factor_mode":                   int(float(_env("FACTOR_MODE", "0"))),
+    # 默认 shadow：先积累 price/micro 因子的 IC，再决定是否切 live。
+    "factor_mode":                   int(float(_env("FACTOR_MODE", "1"))),
     "factor_w_trend":                float(_env("FACTOR_W_TREND", "0.20")),
     "factor_w_reversion":            float(_env("FACTOR_W_REVERSION", "0.15")),
     "factor_w_price":                float(_env("FACTOR_W_PRICE", "0.35")),
@@ -203,12 +223,16 @@ _ENV_KEYS: dict[str, str] = {
     "core_agree_threshold":           "CORE_AGREE_THRESHOLD",
     "core_agree_standard":           "CORE_AGREE_STANDARD",
     "core_contradict_limit":         "CORE_CONTRADICT_LIMIT",
+    "core_trend_min_agree":          "CORE_TREND_MIN_AGREE",
     "entry_require_price_alignment": "ENTRY_REQUIRE_PRICE_ALIGNMENT",
     "entry_price_alignment_min_dev": "ENTRY_PRICE_ALIGNMENT_MIN_DEV",
-    "stake_mult_core3":              "STAKE_MULT_CORE3",
-    "stake_mult_core4":              "STAKE_MULT_CORE4",
-    "stake_mult_core5":              "STAKE_MULT_CORE5",
-    "stake_mult_core6":              "STAKE_MULT_CORE6",
+    "stake_usdc_core3":              "STAKE_USDC_CORE3",
+    "stake_usdc_core4":              "STAKE_USDC_CORE4",
+    "stake_usdc_core5":              "STAKE_USDC_CORE5",
+    "stake_usdc_core6":              "STAKE_USDC_CORE6",
+    "advanced_reduce_action":        "ADVANCED_REDUCE_ACTION",
+    "entry_price_high_threshold":    "ENTRY_PRICE_HIGH_THRESHOLD",
+    "stake_mult_high_price":         "STAKE_MULT_HIGH_PRICE",
     "use_kelly_sizing":              "USE_KELLY_SIZING",
     "kelly_fraction":                "KELLY_FRACTION",
     "kelly_prior_weight":            "KELLY_PRIOR_WEIGHT",

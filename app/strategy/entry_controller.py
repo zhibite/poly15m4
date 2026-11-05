@@ -58,19 +58,27 @@ class EntryParams:
     core_agree_threshold: int = 3
     # 与主方向相反的 Core 信号数量上限（超过则跳过）
     core_contradict_limit: int = 1
+    # 趋势组法定人数：MACD / VWAP / EMA 至少多少个同向确认
+    core_trend_min_agree: int = 2
     # 绝对价格区间（入场时 UP/DOWN 价格必须在此范围内）
     entry_price_min: float = 0.20
     entry_price_max: float = 0.60
+    # 高价减仓：入场价 >= 阈值时仓位乘以系数
+    entry_price_high_threshold: float = 0.50
+    stake_mult_high_price: float = 0.5
 
     # 是否要求信号方向与 CLOB 价格方向一致（可选的额外确认）
     require_price_alignment: bool = False
     price_alignment_min_dev: float = 0.02
 
-    # 按 Core 共识数量配置仓位倍数（相对 base_usdc）
-    stake_mult_core3: float = 0.5
-    stake_mult_core4: float = 1.0
-    stake_mult_core5: float = 1.5
-    stake_mult_core6: float = 2.0
+    # 按 Core 共识数量直接配置入场金额（USDC）；<= 0 表示该共识桶直接跳过
+    stake_usdc_core3: float = 2.0
+    stake_usdc_core4: float = 2.0
+    stake_usdc_core5: float = 4.0
+    stake_usdc_core6: float = 4.0
+
+    # Advanced REDUCE（Funding 极端 / OBI 反向）处理方式：skip / reduce
+    advanced_reduce_action: str = "skip"
 
     # 可选：基于历史胜率的分数 Kelly 仓位
     use_kelly_sizing: bool = False
@@ -194,18 +202,27 @@ class EntryController:
         # 信号驱动参数
         p.core_agree_threshold = int(float(cfg.get("core_agree_threshold", 3)))
         p.core_contradict_limit = int(float(cfg.get("core_contradict_limit", 1)))
+        p.core_trend_min_agree = int(float(cfg.get("core_trend_min_agree", 2)))
         p.entry_early_start_elapsed_sec = float(cfg.get("entry_early_start_elapsed_sec", 0.0))
         p.entry_late_cutoff_elapsed_sec = float(cfg.get("entry_late_cutoff_elapsed_sec", 540.0))
         p.entry_price_min = float(cfg.get("entry_price_min", 0.20))
         p.entry_price_max = float(cfg.get("entry_price_max", 0.60))
+        p.entry_price_high_threshold = float(cfg.get("entry_price_high_threshold", 0.50))
+        p.stake_mult_high_price = float(cfg.get("stake_mult_high_price", 0.5))
 
         p.require_price_alignment = bool(cfg.get("entry_require_price_alignment", False))
         p.price_alignment_min_dev = float(cfg.get("entry_price_alignment_min_dev", 0.02))
 
-        p.stake_mult_core3 = float(cfg.get("stake_mult_core3", 0.5))
-        p.stake_mult_core4 = float(cfg.get("stake_mult_core4", 1.0))
-        p.stake_mult_core5 = float(cfg.get("stake_mult_core5", 1.5))
-        p.stake_mult_core6 = float(cfg.get("stake_mult_core6", 2.0))
+        p.stake_usdc_core3 = float(cfg.get("stake_usdc_core3", 2.0))
+        p.stake_usdc_core4 = float(cfg.get("stake_usdc_core4", 2.0))
+        p.stake_usdc_core5 = float(cfg.get("stake_usdc_core5", 4.0))
+        p.stake_usdc_core6 = float(cfg.get("stake_usdc_core6", 4.0))
+        reduce_action = str(
+            cfg.get("advanced_reduce_action", "skip")
+        ).strip().lower()
+        p.advanced_reduce_action = (
+            reduce_action if reduce_action in ("skip", "reduce") else "skip"
+        )
 
         p.use_kelly_sizing = bool(cfg.get("use_kelly_sizing", False))
         p.kelly_fraction = float(cfg.get("kelly_fraction", 0.25))
@@ -403,8 +420,9 @@ class EntryController:
             )
 
         logger.info(
-            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/6 contradict={} direction={} price={:.4f} action={}",
-            mode_label, asset, elapsed, sig.core_agree, sig.core_contradict,
+            "INDICATOR SIGNAL [{}][{}] elapsed={:.0f}s core={}/6 trend={}/3 contradict={} direction={} price={:.4f} action={}",
+            mode_label, asset, elapsed, sig.core_agree, sig.core_trend_agree,
+            sig.core_contradict,
             sig.direction_label,
             sig.up_mid if sig.direction == SignalDir.UP else sig.down_mid,
             sig.suggested_action,
@@ -428,6 +446,16 @@ class EntryController:
                 asset, sig.core_contradict, p.core_contradict_limit,
             )
             return EntryResult(reason="core_contradiction", signal_result=sig)
+
+        # ── Step 2b: 趋势组法定人数 ─────────────────────────────────────
+        # Pivot / BBands 与 MACD/VWAP/EMA 高度相关，单靠它们凑出的共识
+        # 没有独立筛选价值。要求趋势组至少 N 个确认。
+        if sig.core_trend_agree < p.core_trend_min_agree:
+            logger.info(
+                "check_entry [{}] SKIP: 趋势组确认 {}/3 < {}/3（共识主要来自 Pivot/BBands）",
+                asset, sig.core_trend_agree, p.core_trend_min_agree,
+            )
+            return EntryResult(reason="trend_quorum", signal_result=sig)
 
         # ── Step 3: 确定方向和边 ────────────────────────────────────────────
         if sig.direction == SignalDir.UP:
@@ -487,18 +515,29 @@ class EntryController:
                 )
                 return EntryResult(reason="obi_contradict", signal_result=sig)
 
-        # ── Step 5: 确定仓位（按 Core 6 共识数量，基准 4U）─────────────────
-        # 6/6 → 8U（2×），5/6 → 6U（1.5×），4/6 → 4U（1×），3/6 → 2U（0.5×）
+        # ── Step 5: 确定入场金额（按 Core 共识桶直接给 USDC）──────────
+        # 默认两档：3/6、4/6 → 2U；5/6、6/6 → 4U。金额 <= 0 表示跳过该桶。
         if sig.core_agree >= 6:
-            stake = p.base_usdc * p.stake_mult_core6
+            stake = p.stake_usdc_core6
         elif sig.core_agree >= 5:
-            stake = p.base_usdc * p.stake_mult_core5
+            stake = p.stake_usdc_core5
         elif sig.core_agree >= 4:
-            stake = p.base_usdc * p.stake_mult_core4
+            stake = p.stake_usdc_core4
         else:
-            stake = p.base_usdc * p.stake_mult_core3
+            stake = p.stake_usdc_core3
 
-        # 可选：用历史胜率 + Kelly 覆盖固定倍数仓位
+        if stake <= 0:
+            logger.info(
+                "check_entry [{}] SKIP: Core {}/6 共识桶金额为 0（已禁用）",
+                asset, sig.core_agree,
+            )
+            return EntryResult(
+                reason=f"core{sig.core_agree}_disabled", signal_result=sig,
+            )
+
+        stake = float(stake)
+
+        # 可选：用历史胜率 + Kelly 覆盖固定共识金额
         if p.use_kelly_sizing:
             kelly_stake = await self._kelly_stake(sig.core_agree, price)
             if kelly_stake is not None:
@@ -514,14 +553,29 @@ class EntryController:
                     asset, stake, sig.core_agree, price,
                 )
 
-        # Advanced 过滤要求减仓（Funding 极端反向 / OBI 反向）→ 仓位减半
+        # 高价减仓：入场价越高，结算赔率越差；0.50~0.60 是历史主要亏损区。
+        if price >= p.entry_price_high_threshold and abs(p.stake_mult_high_price - 1.0) > 1e-9:
+            stake *= p.stake_mult_high_price
+            logger.info(
+                "check_entry [{}] HIGH_PRICE: price={:.4f} >= {:.2f} — stake × {:.2f} = {:.1f}u",
+                asset, price, p.entry_price_high_threshold,
+                p.stake_mult_high_price, stake,
+            )
+
+        # Advanced REDUCE（Funding 极端反向 / OBI 反向）：默认直接跳过。
+        # 历史数据中 REDUCE 组整体为负贡献，减半仓位仍不足。
         if sig.advanced.filter_result == FilterResult.REDUCE:
+            reduce_text = sig.advanced.reduce_reason or "advanced filter"
+            if p.advanced_reduce_action == "skip":
+                logger.info(
+                    "check_entry [{}] SKIP: Advanced REDUCE — {}",
+                    asset, reduce_text,
+                )
+                return EntryResult(reason="advanced_reduce_skip", signal_result=sig)
             stake *= 0.5
             logger.info(
                 "check_entry [{}] REDUCE: {} — stake halved to {:.1f}u",
-                asset,
-                sig.advanced.reduce_reason or "advanced filter",
-                stake,
+                asset, reduce_text, stake,
             )
 
         if stake < 1.0:
@@ -532,14 +586,16 @@ class EntryController:
             return EntryResult(reason="stake_too_small", signal_result=sig)
 
         logger.info(
-            "check_entry READY [{}] {} {} @ {:.4f} stake={:.1f}u (core={}/6)",
-            mode_label, asset, direction, price, stake, sig.core_agree,
+            "check_entry READY [{}] {} {} @ {:.4f} stake={:.1f}u (core={}/6 trend={}/3)",
+            mode_label, asset, direction, price, stake,
+            sig.core_agree, sig.core_trend_agree,
         )
 
         # ── Step 6: 序列化信号供日志记录 ───────────────────────────────
         ctx.entry_signal_meta = {
             "core_agree": sig.core_agree,
             "core_contradict": sig.core_contradict,
+            "core_trend_agree": sig.core_trend_agree,
             "strength": sig.strength,
             "strength_label": sig.strength_label,
             "direction": sig.direction.value,
@@ -799,12 +855,27 @@ class EntryController:
         mult = max(0.5, min(2.0, 0.5 + 1.5 * strength))
         stake = p.base_usdc * mult
 
-        # Advanced REDUCE（Funding 极端等）仍作为保守减仓条件
+        # 高价减仓（与 Core 模式一致）
+        if price >= p.entry_price_high_threshold and abs(p.stake_mult_high_price - 1.0) > 1e-9:
+            stake *= p.stake_mult_high_price
+            logger.info(
+                "FACTOR HIGH_PRICE [{}] price={:.4f} >= {:.2f} — stake × {:.2f} = {:.2f}u",
+                asset, price, p.entry_price_high_threshold,
+                p.stake_mult_high_price, stake,
+            )
+
+        # Advanced REDUCE（Funding 极端等）：默认跳过，可配置为减半
         if sig.advanced.filter_result == FilterResult.REDUCE:
+            reduce_text = sig.advanced.reduce_reason or "advanced filter"
+            if p.advanced_reduce_action == "skip":
+                logger.info(
+                    "FACTOR SKIP [{}] Advanced REDUCE — {}", asset, reduce_text,
+                )
+                return EntryResult(reason="advanced_reduce_skip", signal_result=sig)
             stake *= 0.5
             logger.info(
                 "FACTOR REDUCE [{}] {} — stake halved to {:.2f}u",
-                asset, sig.advanced.reduce_reason or "advanced filter", stake,
+                asset, reduce_text, stake,
             )
 
         if stake < 1.0:
@@ -826,6 +897,7 @@ class EntryController:
         ctx.entry_signal_meta = {
             "core_agree": sig.core_agree,
             "core_contradict": sig.core_contradict,
+            "core_trend_agree": sig.core_trend_agree,
             "strength": sig.strength,
             "strength_label": sig.strength_label,
             "direction": direction,

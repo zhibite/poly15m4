@@ -36,14 +36,14 @@ python run.py
 
 ## 功能
 
-- **主策略**: Core 6 指标（RSI / MACD / VWAP / EMA / Pivot / BBands）共识入场，Advanced 5（Funding / CVD / 清算 / OBI / OI）过滤；动态止盈、固定止损、窗口结算
+- **主策略**: Core 6 指标（RSI / MACD / VWAP / EMA / Pivot / BBands）共识入场，趋势组法定人数（MACD/VWAP/EMA）过滤相关性投票，Advanced 5（Funding / CVD / 清算 / OBI / OI）过滤；按共识桶直接给金额（3/6、4/6 → 2U，5/6、6/6 → 4U）、高价减仓、动态止盈、固定止损、窗口结算
 - **观察价止盈**: 止盈触发后以 `tp_price` 作为 FAK 限价卖出；如果盘口跳空到更高 bid，按实际观察到的更高价成交
 - **实盘**: CLOB v2 API（FOK 买入、FAK 卖出、链上 redeem 兜底）
 - **手续费**: 按官方 `shares × fee_rate × p × (1-p)` 计算，从 PnL 中扣除，并写入 EntryRecord / ExitRecord / Trade
 - **WebSocket**: 实时策略状态、盘口价格、技术指标推送
 - **认证**: JWT Bearer Token / HttpOnly Cookie
 - **配置**: 运行时热更新（`POST /api/config`），实盘切换需二次确认
-- **分析**: 决策快照 + 表现统计（`/api/analysis/performance`、`/api/analysis/decisions`）
+- **分析**: 决策快照 + 表现统计（`/api/analysis/performance`、`/api/analysis/decisions`、单指标归因与规则回放 `/api/analysis/attribution`）
 - **因子模型**: 5 因子压缩（trend/reversion/price/micro/flow），支持 shadow/live 模式与相关性/IC 分析（`/api/analysis/factors`）
 - **风控**: 每日亏损上限、连续亏损冷却、单窗口单仓
 
