@@ -54,7 +54,7 @@
 | `MAIN_MAX_DAILY_LOSS_USDC` | 主策略每日已实现亏损上限（负值） |
 | `MAIN_MAX_CONSECUTIVE_LOSSES` | 连续亏损次数上限（0=关闭） |
 | `MAIN_LOSS_COOLDOWN_SEC` | 触发连续亏损后的冷却时间 |
-| `MAX_OPEN_POSITIONS_TOTAL` | 主策略 + 末端策略 + 待结算的全局最大持仓数 |
+| `MAX_OPEN_POSITIONS_TOTAL` | 主策略持仓 + 待结算的全局最大持仓数 |
 
 Kelly 逻辑：`p_est` 用历史胜率按「市场价」做贝叶斯收缩，赔率取 TP/SL 或结算赔率，
 `f=(p*b-(1-p))/b`，乘以 `KELLY_FRACTION` 并限制在 `KELLY_MAX_MULT` 以内。

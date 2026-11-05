@@ -603,7 +603,6 @@ function applyState(d) {
 
   updatePositions(
     d.open_positions || {},
-    d.end_positions || {},
     d.settling_positions || [],
   );
 
@@ -616,16 +615,13 @@ function applyState(d) {
 }
 
 // ── Positions ────────────────────────────────────────────────────────────
-function updatePositions(mainPositions, endPositions, settlingPositions) {
+function updatePositions(mainPositions, settlingPositions) {
   const tbody = document.getElementById('positions_tbody');
   if (!tbody) return;
 
   const rows = [];
   Object.entries(mainPositions || {}).forEach(([asset, p]) => {
     rows.push({ asset, p, kind: '主策略', fills: p.addons_done != null ? String(p.addons_done) : '--', settling: false });
-  });
-  Object.entries(endPositions || {}).forEach(([asset, p]) => {
-    rows.push({ asset, p, kind: '末端', fills: '--', settling: false });
   });
   (settlingPositions || []).forEach((p) => {
     rows.push({ asset: p.asset || '--', p, kind: '结算中', fills: '--', settling: true });

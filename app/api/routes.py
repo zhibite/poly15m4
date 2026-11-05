@@ -140,22 +140,6 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     # 兼容旧 key
     "signal_fixed_stop_loss_pct": (-99.0, 0.0),
     "entry_skip_if_late": (0, 1),
-
-    # ── 末端顺势策略 ────────────────────────────────────────────────
-    "end_window_start_sec": (0.0, 900.0),
-    "end_window_end_sec": (0.0, 900.0),
-    "end_hardcut_sec": (0.0, 900.0),
-    "end_min_entry_price": (0.0, 1.0),
-    "end_confidence_threshold": (0.0, 100.0),
-    # 注意：reversal_stop_pct 是小数（0.05 = 5%），不是百分数
-    "end_reversal_stop_pct": (0.0, 0.5),
-    "end_tp_min_pct": (0.0, 100.0),
-    "end_tp_max_pct": (0.0, 100.0),
-    "end_tp_entry_min": (0.01, 0.99),
-    "end_tp_entry_max": (0.01, 1.0),
-    "end_sl_pct": (-100.0, 0.0),
-    "end_base_position_usdc": (1.0, 100.0),
-    "end_max_daily_loss": (-1000.0, 0.0),
 }
 
 
@@ -169,9 +153,6 @@ _BOOL_KEYS_BODY = frozenset(
         "exit_hold_to_settlement",
         "exit_tp_enabled",
         "exit_sl_enabled",
-        "end_enabled",
-        "end_asset_btc_enabled",
-        "end_asset_eth_enabled",
     }
 )
 
@@ -281,47 +262,6 @@ async def api_update_config(body: dict[str, Any], request: Request):
             status_code=400,
             detail=f"exit_tp_sl_disable_after_elapsed_sec ({exit_disable_after:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
         )
-
-    # 末端策略时间窗口与止盈区间校验
-    end_start = float(merged.get("end_window_start_sec", 720.0))
-    end_end = float(merged.get("end_window_end_sec", 870.0))
-    end_hardcut = float(merged.get("end_hardcut_sec", 885.0))
-    if end_start >= end_end:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_window_start_sec ({end_start:.0f}s) must be < end_window_end_sec ({end_end:.0f}s)",
-        )
-    if end_end > window_dur:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_window_end_sec ({end_end:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
-        )
-    if end_hardcut > window_dur:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_hardcut_sec ({end_hardcut:.0f}s) must be <= market_duration_sec ({window_dur:.0f}s)",
-        )
-    if end_hardcut < end_end:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_hardcut_sec ({end_hardcut:.0f}s) must be >= end_window_end_sec ({end_end:.0f}s)",
-        )
-    end_tp_min = float(merged.get("end_tp_min_pct", 10.0))
-    end_tp_max = float(merged.get("end_tp_max_pct", 30.0))
-    if end_tp_min > end_tp_max:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_tp_min_pct ({end_tp_min}) must be <= end_tp_max_pct ({end_tp_max})",
-        )
-    end_tp_entry_min = float(merged.get("end_tp_entry_min", 0.70))
-    end_tp_entry_max = float(merged.get("end_tp_entry_max", 0.90))
-    if end_tp_entry_min >= end_tp_entry_max:
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_tp_entry_min ({end_tp_entry_min}) must be < end_tp_entry_max ({end_tp_entry_max})",
-        )
-
-    # 信号驱动：时间窗口上界必须在窗口总长以内
 
     # ── live_mode confirmation guard (R0-3) ──────────────────────────────────
     live_switch = patch.get("live_mode")
@@ -515,6 +455,11 @@ async def get_stats():
         )
         loss_amt = abs(float(loss_amt_row.scalar() or 0))
 
+        fee_row = await db.execute(
+            select(func.coalesce(func.sum(Trade.fee_usdc), 0.0))
+        )
+        total_fees = float(fee_row.scalar() or 0)
+
         yield_pct = (total_pnl / total_bet * 100) if total_bet > 0 else 0.0
 
     return {
@@ -525,6 +470,7 @@ async def get_stats():
         "win_rate": (wins / total_exits * 100) if total_exits > 0 else 0.0,
         "total_pnl": total_pnl,
         "total_bet": total_bet,
+        "total_fees": total_fees,
         "yield_pct": yield_pct,
         "win_amount": win_amt,
         "loss_amount": loss_amt,
@@ -606,6 +552,8 @@ async def get_trades(
                     "exit_price": t.exit_price,
                     "pnl_pct": t.pnl_pct,
                     "pnl_usd": t.pnl_usd,
+                    "gross_pnl_usd": t.gross_pnl_usd,
+                    "fee_usdc": t.fee_usdc or 0.0,
                     "close_reason": t.close_reason,
                     "bet_usdc": t.bet_usdc,
                     "opened_at": t.opened_at.isoformat() if t.opened_at else "",
@@ -742,6 +690,8 @@ async def get_exits(
                     "partial_pct": e.partial_pct,
                     "pnl_pct": e.pnl_pct,
                     "pnl_usd": e.pnl_usd,
+                    "gross_pnl_usd": e.gross_pnl_usd,
+                    "fee_usdc": e.fee_usdc or 0.0,
                     "close_reason": e.close_reason,
                     "entry_record_id": e.entry_record_id,
                     "closed_at": e.closed_at.isoformat() if e.closed_at else "",

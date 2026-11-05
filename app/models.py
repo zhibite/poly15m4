@@ -96,9 +96,11 @@ class ExitRecord(Base):
     # 部分平仓比例（0.0 ~ 1.0；全额平仓为 1.0）
     partial_pct = Column(Float, default=1.0)
 
-    # 本次 PnL（基于 effective_entry_price 计算，与入场均价对齐）
-    pnl_pct = Column(Float, nullable=True)   # (exit - entry) / entry * 100
-    pnl_usd = Column(Float, nullable=True)   # pnl_pct * tokens_exited * entry_price（近似）
+    # 本次 PnL（pnl_usd / pnl_pct 为扣除双边手续费后的净值）
+    pnl_pct = Column(Float, nullable=True)   # 净收益率（基于总投入 + 入场手续费）
+    pnl_usd = Column(Float, nullable=True)   # 净盈亏
+    gross_pnl_usd = Column(Float, nullable=True, default=0.0)  # 未扣手续费盈亏
+    fee_usdc = Column(Float, default=0.0)    # 本笔卖出的手续费
 
     # 关联的入场记录
     entry_record_id = Column(Integer, index=True, nullable=True)
@@ -126,14 +128,16 @@ class Trade(Base):
     tokens_bought = Column(Float, nullable=False)
     exit_price = Column(Float, nullable=True)
 
-    pnl_pct = Column(Float, nullable=True)
-    pnl_usd = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)   # 净收益率
+    pnl_usd = Column(Float, nullable=True)   # 净盈亏
+    gross_pnl_usd = Column(Float, nullable=True, default=0.0)  # 未扣手续费盈亏
+    fee_usdc = Column(Float, default=0.0)    # 双边手续费合计
     close_reason = Column(Text, default="")
 
     bet_usdc = Column(Float, nullable=False)
     mode = Column(String(8), default="dry", nullable=False)
     fills = Column(Integer, default=1, nullable=False)
-    # main / end — 用于分析两套策略的独立表现
+    # main — 历史数据中可能仍有 end（末端策略已移除）
     strategy = Column(String(8), default="main", nullable=False, index=True)
     entry_core_agree = Column(Integer, default=0, nullable=False)
 
@@ -145,8 +149,8 @@ class DecisionSnapshot(Base):
     """
     每次「新 bar 信号计算」保存一份完整决策快照，用于事后的信号有效性分析。
 
-    只保存主策略 EntryController 的决策；末端策略的置信度可通过 EntryRecord/
-    Trade 的 strategy='end' 区分分析。
+    只保存主策略 EntryController 的决策。历史数据中可能仍有 strategy='end'
+    （末端策略已移除）。
     """
     __tablename__ = "decision_snapshots"
 

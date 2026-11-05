@@ -42,7 +42,6 @@ from app.strategy.window_context import WindowContext
 from app.strategy.window_manager import WindowManager
 from app.strategy.models import MarketInfo, OpenPosition
 from app.strategy.indicator_signal_service import IndicatorSignalService
-from app.strategy.end_window_strategy import EndWindowStrategy
 
 
 class SinglePositionStrategy:
@@ -65,7 +64,6 @@ class SinglePositionStrategy:
         self._risk = RiskManager()
         # 类型：dict[str, IndicatorSignalService]，key 为 "BTC" / "ETH"
         self._ind_svc: dict[str, IndicatorSignalService] = {}
-        self._end_strategy: Optional[EndWindowStrategy] = None
 
         self._running: bool = False
         self._running_lock = asyncio.Lock()
@@ -151,10 +149,6 @@ class SinglePositionStrategy:
         # 避免钱包/凭证失效后控制器仍持有旧的 LiveTrader 引用。
         if self._entry_ctrl is not None:
             self._entry_ctrl._live_trader = trader
-        # tick() 的 live_trader 参数只表示“本次是否允许实盘入场”；
-        # 这里保存实际引用，供末端策略在平仓/窗口切换时使用（即使 live_mode 已关闭）。
-        if self._end_strategy is not None:
-            self._end_strategy._live_trader = trader
 
     def _symbols_enabled(self) -> list[str]:
         cfg = get_config()
@@ -190,11 +184,6 @@ class SinglePositionStrategy:
             decision_logger=self._logger,
             risk_manager=self._risk,
         )
-        # 末端策略必须在 _exit_ctrl 之后创建，以便注入 pos_mgr
-        self._end_strategy = EndWindowStrategy(pos_mgr=self._pos_mgr, pm=self.pm)
-        # set_live_trader() 可能在本方法之前已被调用（此时 _end_strategy 还不存在），
-        # 这里补一次引用；后续 LiveTrader 重建时 set_live_trader 会继续同步。
-        self._end_strategy._live_trader = self._live_trader
         self._entry_ctrl = EntryController(
             pm=self.pm,
             market_svc=self._market_svc,
@@ -207,7 +196,6 @@ class SinglePositionStrategy:
             self._market_svc, self.ALL_SYMBOLS,
             entry_ctrl=self._entry_ctrl,
             decision_logger=self._logger,
-            end_strategy=self._end_strategy,
         )
 
     def _sync_config(self):
@@ -239,8 +227,6 @@ class SinglePositionStrategy:
             self._entry_ctrl.sync_params(cfg)
         if self._exit_ctrl:
             self._exit_ctrl.sync_params(cfg)
-        if self._end_strategy:
-            self._end_strategy.sync_params(cfg)
 
         for svc in self._ind_svc.values():
             svc.set_thresholds(
@@ -543,14 +529,9 @@ class SinglePositionStrategy:
 
                 ops = self._symbols_operational()
 
-                # 全局暴露上限：主策略持仓 + 末端持仓 + 待结算持仓
+                # 全局暴露上限：主策略持仓 + 待结算持仓
                 max_open = int(float(get_config().get("max_open_positions_total", 4)))
                 open_count = sum(1 for c in ctxs.values() if c.position is not None)
-                if self._end_strategy is not None:
-                    open_count += sum(
-                        1 for a in self.ALL_SYMBOLS
-                        if self._end_strategy.has_position(a)
-                    )
                 open_count += len(self._pending_settlements)
 
                 # 退出检查
@@ -577,60 +558,11 @@ class SinglePositionStrategy:
                         continue
                     if ctx.position is not None and getattr(ctx.position, "_pending_close", False):
                         continue
-                    # 同一窗口不叠加：末端策略已有持仓时主策略不再入场
-                    if self._end_strategy is not None and self._end_strategy.has_position(asset):
-                        continue
                     if open_count >= max_open:
                         continue
                     entry_result = await self._entry_ctrl.check_entry(asset, ctx)
                     if entry_result.triggered:
                         open_count += 1
-
-                # 3. 末端策略 tick（T=12min~14.5min，独立入场/退出）
-                #
-                # 退出检查必须始终运行：如果用户在持仓期间关闭 end_enabled 或
-                # 对应资产开关，已有持仓仍需要 E1 硬截止 / TP / SL 管理，直到
-                # 平仓完成。只有“新入场”受开关控制（allow_entry）。
-                if self._end_strategy:
-                    cfg = get_config()
-                    end_enabled = bool(cfg.get("end_enabled", False))
-                    end_assets = [
-                        a for a in ("BTC", "ETH")
-                        if cfg.get(f"end_asset_{a.lower()}_enabled", True)
-                    ]
-                    end_ops = [
-                        a for a in ("BTC", "ETH")
-                        if a in end_assets or self._end_strategy.has_position(a)
-                    ]
-                    for asset in end_ops:
-                        ctx = ctxs.get(asset)
-                        if not ctx or not ctx.market:
-                            continue
-                        sig_result = self._latest_indicators.get(asset)
-                        # 主策略在本窗口有持仓或已经交易过 → 末端策略跳过（不叠加）
-                        main_has_pos = (ctx.position is not None) or ctx.is_traded
-                        main_dir = (
-                            ctx.position.side.value
-                            if ctx.position else "NONE"
-                        )
-                        allow_entry = (
-                            end_enabled
-                            and asset in end_assets
-                            and open_count < max_open
-                            and not self._entry_ctrl.is_locked(asset)
-                        )
-                        acted, desc = await self._end_strategy.tick(
-                            asset=asset,
-                            ctx=ctx,
-                            indicator_signal_result=sig_result,
-                            main_has_position=main_has_pos,
-                            main_direction=main_dir,
-                            live_trader=self._live_trader if self.live_mode else None,
-                            market_duration_sec=float(self.market_duration_sec),
-                            allow_entry=allow_entry,
-                        )
-                        if acted and desc.startswith("entered"):
-                            open_count += 1
 
                 # 3. FOK 重试
                 await self._entry_ctrl.fire_entry_retries(ctxs)
@@ -686,44 +618,6 @@ class SinglePositionStrategy:
                 "entry_core_agree": pos.entry_core_agree,
                 "mid": cur,
             }
-
-        # 末端策略独立持仓（不在 ctx.position 中）
-        end_positions: dict[str, dict] = {}
-        if self._end_strategy:
-            for a in self.ALL_SYMBOLS:
-                ep = self._end_strategy.get_position(a)
-                if ep is None:
-                    continue
-                ctx = ctxs.get(a) or (self._wm.get(a) if self._wm else None)
-                mkt = ctx.market if ctx and ctx.market else ep.market
-                um = mkt._up_mid if mkt else 0.5
-                dn = mkt._down_mid if mkt else 0.5
-                cur = um if ep.direction == "UP" else dn
-                pnl = self._end_strategy._calc_pnl_pct(ep, um, dn)
-                conf = self._end_strategy.get_confidence(a)
-                end_positions[a] = {
-                    "side": ep.direction,
-                    "tokens": ep.tokens_bought,
-                    "entry_price": ep.entry_price,
-                    "vwap": ep.effective_entry_price,
-                    "actual_cost_usdc": ep.actual_cost_usdc,
-                    "window_end": ep.window_end.isoformat() if ep.window_end else "",
-                    "unrealized_pnl_pct": pnl,
-                    "unrealized_pnl": round(ep.actual_cost_usdc * pnl / 100.0, 4),
-                    "confidence_total": conf.total if conf else 0.0,
-                    "confidence": (
-                        {
-                            "D1": conf.D1_signal,
-                            "D2": conf.D2_deviation,
-                            "D3": conf.D3_momentum,
-                            "D4": conf.D4_reversal,
-                            "D5": conf.D5_liquidity,
-                        }
-                        if conf else None
-                    ),
-                    "entry_core_agree": ep.entry_core_agree,
-                    "mid": cur,
-                }
 
         # 最近的因子快照（shadow 模式可直接在 /ws/live 观察）
         latest_factors: dict[str, dict] = {}
@@ -782,8 +676,6 @@ class SinglePositionStrategy:
                 for a, ctx in self._wm._ctxs.items()
             },
             "open_positions": outs,
-            "end_enabled": bool(cfg.get("end_enabled", False)),
-            "end_positions": end_positions,
             "settling_positions": settling_positions,
             "risk": self._risk.snapshot(),
             "factors": latest_factors,
@@ -943,11 +835,6 @@ class SinglePositionStrategy:
                 await self._exit_ctrl.close()
             except Exception as exc:
                 logger.warning("ExitController close wait failed: {}", exc)
-        if self._end_strategy is not None:
-            try:
-                await self._end_strategy.close()
-            except Exception as exc:
-                logger.warning("EndWindow close wait failed: {}", exc)
 
         tasks = [t for t in self._settlement_tasks.values() if t and not t.done()]
         if tasks:

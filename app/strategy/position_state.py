@@ -39,12 +39,6 @@ class ExitReason:
     REDEEM_ZERO        = "赎回零回收"
     RESIDUAL_EXHAUSTED = "残差轮次耗尽"
 
-    # ── 末端顺势策略退出原因 ───────────────────────────────────────────
-    END_HARDCUT            = "HARDCUT"
-    END_DIRECTION_REVERSAL = "DIRECTION_REVERSAL"
-    END_TAKE_PROFIT        = "TAKE_PROFIT"
-    END_STOP_LOSS          = "STOP_LOSS"
-
     # ── 辅助方法 ──────────────────────────────────────────────────────
 
     @staticmethod

@@ -89,10 +89,28 @@ def closed_pnl(pos: OpenPosition, exit_price: float) -> float:
 | "分方向用不同公式计算 PnL" | 不需要。统一公式对所有方向都正确 |
 | "持有 DOWN token 等于做空市场概率" | 错误。DOWN token 不是做空，它是独立的 token，其价格就是它的价值 |
 
+## 手续费与净 PnL
+
+当前代码的 `pnl_pct` / `pnl_usd` 是**扣除双边手续费后的净值**：
+
+```text
+gross_pnl_usd = 卖出数量 × (exit_price - effective_entry_price)
+fee_usdc      = 入场手续费 + 出场手续费
+pnl_usd       = gross_pnl_usd - fee_usdc
+pnl_pct       = pnl_usd / (实际投入 + 入场手续费) × 100
+```
+
+- `EntryRecord.fee_usdc` / `Fill.fee_usdc`：入场手续费
+- `ExitRecord.fee_usdc` / `ExitRecord.gross_pnl_usd`：出场手续费 / 毛盈亏
+- `Trade.fee_usdc` / `Trade.gross_pnl_usd`：双边手续费合计 / 毛盈亏
+- 实盘优先使用 CLOB `fills[].fee`；拿不到时用 `fee_rate_bps` 估算
+- dry 模式按同样的费率模拟入场和出场手续费
+- 链上 redeem 的 gas 费目前未计入 PnL
+
 ## 总结
 
 Polymarket 的 UP/DOWN token 是两种**独立的资产**，每个都有独立的价格。
 
 - **买入价**决定了你的成本
 - **当前市场价**决定了你的持仓当前值多少
-- **PnL = (当前值 - 成本) / 成本**，对 UP 和 DOWN 完全相同，不需要分方向处理
+- **PnL = (当前值 - 成本 - 手续费) / 成本**，对 UP 和 DOWN 完全相同，不需要分方向处理

@@ -82,11 +82,12 @@ def _prec_for_fak_size(tick_size: Decimal) -> Decimal:
 class FillResult:
     order_id: str
     tokens: float       # number of tokens bought/sold
-    usdc: float         # USDC spent (buy) or received (sell)
+    usdc: float         # USDC spent (buy) or received (sell), gross of fees
     fill_price: float   # effective fill price per token
     success: bool
     error: str = ""
     estimated_price: bool = False  # CRITICAL FIX (R1): true when fill price was estimated (no averageFillPrice from CLOB)
+    fee_usdc: float = 0.0          # taker/maker fee reported by CLOB fills
 
 
 class CLOBError(Exception):
@@ -230,6 +231,25 @@ class LiveTrader:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
+    @staticmethod
+    def _apply_fee_fallback(result: Optional[FillResult], fee_rate_bps: int) -> Optional[FillResult]:
+        """Estimate a missing CLOB fee from the token's fee rate.
+
+        Normal fills include an explicit per-fill ``fee``.  Some FOK responses
+        report ``matched`` without fills[] (and therefore without a fee), so we
+        fall back to ``notional * fee_bps / 10_000`` to avoid recording a
+        zero-fee trade.
+        """
+        if result is None or not result.success:
+            return result
+        if result.fee_usdc > 0 or fee_rate_bps <= 0:
+            return result
+        fee = (Decimal(str(result.usdc)) * Decimal(int(fee_rate_bps)) / Decimal(10000)).quantize(
+            Decimal("0.000001"), rounding=ROUND_DOWN,
+        )
+        result.fee_usdc = float(fee)
+        return result
+
     async def _get_tick_size(self, token_id: str) -> str:
         """Return the correct tick_size for a token, cached per token_id."""
         if token_id in self._tick_size_cache:
@@ -364,7 +384,7 @@ class LiveTrader:
                             )
                     if fills_fak and result_fak.success:
                         self.invalidate_token_balance_cache(token_id)
-                        return result_fak
+                        return self._apply_fee_fallback(result_fak, fee_rate_bps)
                     logger.warning(
                         "buy_token FAK fallback also returned no fills for {}",
                         token_id[:12],
@@ -397,7 +417,7 @@ class LiveTrader:
                 )
             if result.success:
                 self.invalidate_token_balance_cache(token_id)
-            return result
+            return self._apply_fee_fallback(result, fee_rate_bps)
 
         # FOK: poll until fills confirmed.
         resp = await self._poll_fills_until_ready(
@@ -406,7 +426,7 @@ class LiveTrader:
         result = self._parse_fill(resp, tokens_ref, "BUY", tick_size, midpoint)
         if result.success:
             self.invalidate_token_balance_cache(token_id)
-        return result
+        return self._apply_fee_fallback(result, fee_rate_bps)
 
     # ── Market sell (FAK) ──────────────────────────────────────────────────────
     async def sell_token(
@@ -558,14 +578,14 @@ class LiveTrader:
                     )
                     measured_usdc_pre = measured_pre * float(limit_price_dec)
                     self.invalidate_balance_cache()
-                    return FillResult(
+                    return self._apply_fee_fallback(FillResult(
                         order_id="",
                         tokens=_q(Decimal(str(measured_pre)), size_prec),
                         usdc=_q(Decimal(str(measured_usdc_pre)), Decimal("0.01")),
                         fill_price=limit_price_ref,
                         success=True,
                         error="",
-                    )
+                    ), fee_rate_bps)
 
             # ── Balance-diff shows no fill: classify error and retry ──────────────
             is_balance_error = "status=400" in exc_str and "balance" in exc_str.lower()
@@ -643,7 +663,7 @@ class LiveTrader:
                             self.invalidate_token_balance_cache(token_id)
                             self.invalidate_balance_cache()
                         resp = resp_retry
-                        return result
+                        return self._apply_fee_fallback(result, fee_rate_bps)
                     except Exception as exc_retry:
                         # Balance-diff check before re-raising: the order may have filled on-chain
                         # despite the exception (same race as the primary path above).
@@ -658,14 +678,14 @@ class LiveTrader:
                                     exc_str[:200], diff,
                                 )
                                 self.invalidate_balance_cache()
-                                return FillResult(
+                                return self._apply_fee_fallback(FillResult(
                                     order_id="",
                                     tokens=_q(Decimal(str(diff)), size_prec),
                                     usdc=_q(Decimal(str(diff * float(limit_price_dec))), Decimal("0.01")),
                                     fill_price=limit_price_ref,
                                     success=True,
                                     error="",
-                                )
+                                ), fee_rate_bps)
                         logger.warning("sell_token retry after reduce also failed: {}", exc_retry)
                         return FillResult("", 0, 0, midpoint, False, str(exc_retry))
                 else:
@@ -730,7 +750,7 @@ class LiveTrader:
         if result.success:
             self.invalidate_token_balance_cache(token_id)
             self.invalidate_balance_cache()  # also refresh pUSD collateral balance for next entry
-        return result
+        return self._apply_fee_fallback(result, fee_rate_bps)
 
     async def _poll_fills_until_ready(
         self,
@@ -1139,11 +1159,14 @@ class LiveTrader:
 
         total_tokens = Decimal("0")
         total_usdc = Decimal("0")
+        total_fee = Decimal("0")
         for f in fills:
             size = Decimal(str(float(f.get("size", 0))))
             price = Decimal(str(float(f.get("price", midpoint))))
+            fee = Decimal(str(float(f.get("fee", 0) or 0)))
             total_tokens += size
             total_usdc += size * price
+            total_fee += fee
 
         if total_tokens == 0:
             return FillResult(resp.get("orderID", ""), 0, 0, midpoint, False, "zero fill size")
@@ -1151,6 +1174,7 @@ class LiveTrader:
         avg_price = _q(total_usdc / total_tokens, price_tick)
         tokens_f  = _q(total_tokens, Decimal("0.0001"))
         usdc_f    = _q(total_usdc, Decimal("0.01"))
+        fee_f     = _q(total_fee, Decimal("0.000001"))
 
         return FillResult(
             order_id=resp.get("orderID", ""),
@@ -1159,6 +1183,7 @@ class LiveTrader:
             fill_price=avg_price,
             success=True,
             error="",
+            fee_usdc=fee_f,
         )
 
     # ── Balance / allowance ─────────────────────────────────────────────────────

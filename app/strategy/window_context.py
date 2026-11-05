@@ -68,7 +68,7 @@ class WindowContext:
     # 标记本 tick 内窗口是否刚切换（新窗口的第一 tick 跳过 elapsed cutoff 检查）
     is_fresh: bool = field(default=False)
 
-    # ── 末端策略：UP 价格采样序列（每分钟追加一条，用于 D3 和 D4）──────────
+    # ── UP 价格采样序列（每分钟追加一条，供因子模型的 price 因子使用）──────
     # 保留最近 16 条（T=15min = 15 条 + 1 条缓冲）
     up_samples: list[float] = field(default_factory=list)
     # 上次追加时的 UTC 分钟数（避免每 tick 重复追加同一条价格）
@@ -163,7 +163,7 @@ class WindowContext:
     def is_late(self, cutoff_sec: float) -> bool:
         return self.elapsed() >= cutoff_sec - 1e-9
 
-    # ── 末端策略：UP 价格采样 ────────────────────────────────────────────
+    # ── UP 价格采样 ─────────────────────────────────────────────────────
 
     def append_up_sample(self, up_mid: float) -> None:
         """每分钟追加一条 UP 中价采样（去重：同分钟内不重复追加）"""

@@ -81,6 +81,8 @@ class OpenPosition:
     # 入场时的执行模式（live / dry）。平仓必须按持仓自身模式执行：
     # live 持仓即使 live_mode 已是 False，也不能静默按 dry 记录。
     execution_mode: str = "dry"
+    # 入场手续费（USDC）；平仓时用于计算净 PnL
+    entry_fee_usdc: float = 0.0
     # 平仓重试状态：失败后保留持仓，稍后由主循环重试，而不是直接丢弃。
     _close_attempts: int = 0
     _next_close_retry_at: float = 0.0

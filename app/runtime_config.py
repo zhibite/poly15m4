@@ -167,7 +167,7 @@ _runtime: dict = {
     # 连续亏损次数上限（0 = 关闭）+ 冷却时间
     "main_max_consecutive_losses":        int(float(_env("MAIN_MAX_CONSECUTIVE_LOSSES", "3"))),
     "main_loss_cooldown_sec":             int(float(_env("MAIN_LOSS_COOLDOWN_SEC", "900"))),
-    # 全局最大同时持仓数（主策略 + 末端策略 + 待结算）
+    # 全局最大同时持仓数（主策略持仓 + 待结算）
     "max_open_positions_total":           int(float(_env("MAX_OPEN_POSITIONS_TOTAL", "4"))),
 
     # ── 流动性过滤 ─────────────────────────────────────────────────────────
@@ -177,23 +177,6 @@ _runtime: dict = {
     # OI 多少变化才算显著（默认 2%）
     "oi_change_significant": float(_env("OI_CHANGE_SIGNIFICANT", "0.02")),
 
-    # ── 末端顺势策略（end_window_strategy）─────────────────────────────
-    "end_enabled":                    _env_bool("END_ENABLED", False),
-    "end_asset_btc_enabled":           _env_bool("END_ASSET_BTC_ENABLED", True),
-    "end_asset_eth_enabled":          _env_bool("END_ASSET_ETH_ENABLED", True),
-    "end_window_start_sec":            float(_env("END_WINDOW_START_SEC", "720.0")),
-    "end_window_end_sec":              float(_env("END_WINDOW_END_SEC", "870.0")),
-    "end_hardcut_sec":                float(_env("END_HARDCUT_SEC", "885.0")),
-    "end_min_entry_price":             float(_env("END_MIN_ENTRY_PRICE", "0.70")),
-    "end_confidence_threshold":        float(_env("END_CONFIDENCE_THRESHOLD", "50.0")),
-    "end_reversal_stop_pct":           float(_env("END_REVERSAL_STOP_PCT", "0.05")),
-    "end_tp_min_pct":                 float(_env("END_TP_MIN_PCT", "10.0")),
-    "end_tp_max_pct":                 float(_env("END_TP_MAX_PCT", "30.0")),
-    "end_tp_entry_min":               float(_env("END_TP_ENTRY_MIN", "0.70")),
-    "end_tp_entry_max":               float(_env("END_TP_ENTRY_MAX", "0.90")),
-    "end_sl_pct":                    float(_env("END_SL_PCT", "-15.0")),
-    "end_base_position_usdc":         float(_env("END_BASE_POSITION_USDC", "4.0")),
-    "end_max_daily_loss":             float(_env("END_MAX_DAILY_LOSS", "-20.0")),
 }
 
 _ENV_KEYS: dict[str, str] = {
@@ -270,23 +253,6 @@ _ENV_KEYS: dict[str, str] = {
     "obi_contradict_skip":    "OBI_CONTRADICT_SKIP",
     "oi_change_significant":  "OI_CHANGE_SIGNIFICANT",
 
-    # 末端顺势策略
-    "end_enabled":                    "END_ENABLED",
-    "end_asset_btc_enabled":          "END_ASSET_BTC_ENABLED",
-    "end_asset_eth_enabled":         "END_ASSET_ETH_ENABLED",
-    "end_window_start_sec":           "END_WINDOW_START_SEC",
-    "end_window_end_sec":             "END_WINDOW_END_SEC",
-    "end_hardcut_sec":               "END_HARDCUT_SEC",
-    "end_min_entry_price":            "END_MIN_ENTRY_PRICE",
-    "end_confidence_threshold":       "END_CONFIDENCE_THRESHOLD",
-    "end_reversal_stop_pct":          "END_REVERSAL_STOP_PCT",
-    "end_tp_min_pct":                "END_TP_MIN_PCT",
-    "end_tp_max_pct":                "END_TP_MAX_PCT",
-    "end_tp_entry_min":              "END_TP_ENTRY_MIN",
-    "end_tp_entry_max":              "END_TP_ENTRY_MAX",
-    "end_sl_pct":                   "END_SL_PCT",
-    "end_base_position_usdc":        "END_BASE_POSITION_USDC",
-    "end_max_daily_loss":            "END_MAX_DAILY_LOSS",
 }
 
 # 缓存上次返回的深拷贝，仅当 _runtime 实际更新后才重新生成。

@@ -70,6 +70,7 @@ class SellOutcome:
     fill_price: float = 0.0
     error: str = ""
     is_redeem: bool = False
+    fee_usdc: float = 0.0
 
 
 # ── PositionManager ────────────────────────────────────────────────────────────
@@ -126,29 +127,50 @@ class PositionManager:
         pos: OpenPosition,
         exit_price: float,
         filled_tokens: float,
+        exit_fee_usdc: float = 0.0,
     ) -> tuple[float, float]:
         """
         纯函数：根据 exit_price 和实际成交 token 数计算 PnL。
         不读写任何状态，不访问 DB。
-        Returns: (pnl_pct, pnl_usd)
+
+        返回的是**扣除入场和出场手续费后的净 PnL**：
+          gross_usd = filled_tokens × (exit_price - effective_entry_price)
+          net_usd   = gross_usd - entry_fee_share - exit_fee_usdc
+          pnl_pct   = net_usd / (cost_share + entry_fee_share) × 100
+
+        Returns: (net_pnl_pct, net_pnl_usd)
         """
         if pos.effective_entry_price <= 0:
-            pnl_pct = -100.0
-            pnl_usd = 0.0  # 零成本入场，美元盈亏为 0（无实际业务意义，仅防御性）
-            return pnl_pct, pnl_usd
+            return -100.0, 0.0
 
         # CRITICAL FIX: prevent NaN/inf when filled_tokens <= 0.
-        # If no tokens were actually filled (e.g. stale position / force-close with 0 tokens),
-        # PnL cannot be meaningfully computed — return 0 to avoid propagating bad data.
         if filled_tokens <= 0:
             return 0.0, 0.0
 
-        pnl_pct = (exit_price - pos.effective_entry_price) / pos.effective_entry_price * 100
-
         ratio = filled_tokens / pos.tokens_bought if pos.tokens_bought > 0 else 1.0
         cost_usdc = pos.actual_cost_usdc * ratio
-        pnl_usd = cost_usdc * pnl_pct / 100
-        return pnl_pct, pnl_usd
+        entry_fee = float(getattr(pos, "entry_fee_usdc", 0.0) or 0.0) * ratio
+
+        gross_pnl_usd = filled_tokens * (exit_price - pos.effective_entry_price)
+        total_fee = entry_fee + float(exit_fee_usdc or 0.0)
+        net_pnl_usd = gross_pnl_usd - total_fee
+
+        invested = cost_usdc + entry_fee
+        net_pnl_pct = (net_pnl_usd / invested * 100.0) if invested > 1e-12 else 0.0
+        return net_pnl_pct, net_pnl_usd
+
+    @staticmethod
+    def _fee_bps_for(pos: OpenPosition) -> int:
+        bps = int(getattr(pos, "taker_fee_bps", 0) or 0)
+        if bps <= 0:
+            bps = int(float(get_config().get("default_fee_bps", 30)))
+        return max(0, bps)
+
+    def _estimate_exit_fee(self, pos: OpenPosition, exit_price: float, tokens: float) -> float:
+        """Fee estimate for dry-run / missing CLOB fee data."""
+        if tokens <= 0 or exit_price <= 0:
+            return 0.0
+        return max(0.0, exit_price * tokens * self._fee_bps_for(pos) / 10_000.0)
 
     def closed_pnl(
         self, pos: OpenPosition, exit_price: float
@@ -214,6 +236,7 @@ class PositionManager:
             pos.token_id_bought,
             tokens_to_sell,
             sell_price,
+            self._fee_bps_for(pos),
             neg_risk=neg_risk,
             # user_usdc_balance is intentionally omitted for SELL orders.
             # The CLOB validates SELL against token balance (not pUSD), so passing a
@@ -232,6 +255,7 @@ class PositionManager:
                 tokens=result.tokens if result.tokens else tokens_to_sell,
                 usdc=result.usdc,
                 fill_price=result.fill_price,
+                fee_usdc=float(result.fee_usdc or 0.0),
             )
         error = result.error if result else "unknown"
         return SellOutcome(success=False, error=error)
@@ -284,10 +308,11 @@ class PositionManager:
         tokens_at_entry: float,
         close_reason: str = ExitReason.TAKE_PROFIT,
         closed_at_override: Optional[datetime] = None,
-    ) -> tuple[float, float, str, float, bool]:
+    ) -> tuple[float, float, float, str, float, bool]:
         """
         循环执行 CLOB sell，直到余额清零或超过最大轮数。
-        Returns: (total_sold_tokens, total_sold_usdc, final_reason, avg_exit_price, already_recorded)
+        Returns: (total_sold_tokens, total_sold_usdc, total_fee_usdc,
+                  final_reason, avg_exit_price, already_recorded)
 
         Partial fills are handled internally: when CLOB only fills part of the order the
         loop continues immediately rather than raising.  This guarantees that all tokens
@@ -304,6 +329,7 @@ class PositionManager:
         remaining_tokens = float(pos.tokens_bought)
         total_sold_tokens = 0.0
         total_sold_usdc = 0.0
+        total_fee_usdc = 0.0
         # Track actual average fill price across all CLOB fills (excl. dust/force-sell
         # cleanup rounds which pollute totals and must not distort avg_exit).
         _actual_fill_total_usdc = 0.0
@@ -340,10 +366,11 @@ class PositionManager:
                     await self._record_trade(
                         pos, avg_exit, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
+                        exit_fee_usdc=total_fee_usdc,
                     )
                     pos._trade_recorded = True
                     already_recorded = True
-                return total_sold_tokens, total_sold_usdc, final_reason, avg_exit, already_recorded
+                return total_sold_tokens, total_sold_usdc, total_fee_usdc, final_reason, avg_exit, already_recorded
 
             outcome = await self._clob_exit(
                 pos, tokens_to_sell, sell_price, neg_risk, live_trader,
@@ -362,12 +389,15 @@ class PositionManager:
                     await self._record_trade(
                         pos, sell_price, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
+                        exit_fee_usdc=total_fee_usdc,
                     )
                     # CRITICAL: also set pos._trade_recorded so close_position's
                     # own _record_trade call at the end does not create a duplicate.
                     pos._trade_recorded = True
                     already_recorded = True
-                    pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, tokens_at_entry)
+                    pnl_pct, pnl_usd = self._compute_pnl(
+                        pos, sell_price, tokens_at_entry, total_fee_usdc,
+                    )
                     logger.info(
                         "close_loop {} trade recorded: {} tokens @ {:.4f}, pnl={:.2f}%",
                         pos.asset, tokens_at_entry, sell_price, pnl_pct,
@@ -386,7 +416,7 @@ class PositionManager:
                         )
                 # avg_exit uses sell_price — the dust sell is not part of the trade PnL
                 avg_exit = sell_price
-                return total_sold_tokens, total_sold_usdc, final_reason, avg_exit, already_recorded
+                return total_sold_tokens, total_sold_usdc, total_fee_usdc, final_reason, avg_exit, already_recorded
 
             if not outcome.success:
                 error = outcome.error
@@ -402,11 +432,11 @@ class PositionManager:
                             if tokens_to_sell > 1e-9
                             else sell_price
                         )
-                        return tokens_to_sell, redeem_outcome.usdc, "redeem_fallback", avg_exit, already_recorded
+                        return tokens_to_sell, redeem_outcome.usdc, total_fee_usdc, "redeem_fallback", avg_exit, already_recorded
                     elif sell_price > 1e-9:
-                        return tokens_to_sell, tokens_to_sell * sell_price, ExitReason.CLOB_REDEEM, sell_price, already_recorded
+                        return tokens_to_sell, tokens_to_sell * sell_price, total_fee_usdc, ExitReason.CLOB_REDEEM, sell_price, already_recorded
                     else:
-                        return tokens_to_sell, 0.0, ExitReason.REDEEM_ZERO, 0.0, already_recorded
+                        return tokens_to_sell, 0.0, total_fee_usdc, ExitReason.REDEEM_ZERO, 0.0, already_recorded
                 raise CLOBExitError(error)
 
             # ── CLOB 卖出成功 ────────────────────────────────────────────────
@@ -445,6 +475,7 @@ class PositionManager:
                 # Add partial fill to totals and continue immediately.
                 total_sold_tokens += actual_tokens
                 total_sold_usdc += actual_usdc
+                total_fee_usdc += float(outcome.fee_usdc or 0.0)
                 # Track actual fill average separately from dust/force-sell cleanup proceeds.
                 _actual_fill_total_tokens += actual_tokens
                 _actual_fill_total_usdc += actual_usdc
@@ -460,11 +491,12 @@ class PositionManager:
                 post_live = await live_trader.get_token_balance(pos.token_id_bought)
                 if post_live is None or post_live <= 1e-9:
                     avg_exit = _avg_fill()
-                    return total_sold_tokens, total_sold_usdc, "", avg_exit, already_recorded
+                    return total_sold_tokens, total_sold_usdc, total_fee_usdc, "", avg_exit, already_recorded
                 continue
 
             total_sold_tokens += actual_tokens
             total_sold_usdc += actual_usdc
+            total_fee_usdc += float(outcome.fee_usdc or 0.0)
             remaining_tokens = max(0.0, remaining_tokens - actual_tokens)
             final_reason = close_reason
             # Track actual fill average separately from dust/force-sell cleanup proceeds.
@@ -478,7 +510,7 @@ class PositionManager:
             post_live = await live_trader.get_token_balance(pos.token_id_bought)
             if post_live is None or post_live <= 1e-9:
                 avg_exit = _avg_fill()
-                return total_sold_tokens, total_sold_usdc, final_reason, avg_exit, already_recorded
+                return total_sold_tokens, total_sold_usdc, total_fee_usdc, final_reason, avg_exit, already_recorded
 
             residual_rounds += 1
             if residual_rounds > max_rounds:
@@ -496,12 +528,15 @@ class PositionManager:
                     await self._record_trade(
                         pos, avg_first_exit, close_reason, closed_at_override,
                         total_sold_tokens=tokens_at_entry,
+                        exit_fee_usdc=total_fee_usdc,
                     )
                     # CRITICAL: also set pos._trade_recorded so close_position's
                     # own _record_trade call at the end does not create a duplicate.
                     pos._trade_recorded = True
                     already_recorded = True
-                    pnl_pct, _ = self._compute_pnl(pos, avg_first_exit, tokens_at_entry)
+                    pnl_pct, _ = self._compute_pnl(
+                        pos, avg_first_exit, tokens_at_entry, total_fee_usdc,
+                    )
                     logger.info(
                         "close_loop {} trade recorded (残差轮次耗尽): "
                         "{} tokens @ {:.4f}, pnl={:.2f}%",
@@ -514,7 +549,7 @@ class PositionManager:
                     # total_sold_tokens/total_sold_usdc for PnL purposes (trade already recorded).
                     # Return the actual fill average from real CLOB fills, NOT the cleanup price.
                     remaining_tokens = 0.0
-                    return total_sold_tokens, total_sold_usdc, final_reason, avg_first_exit, already_recorded
+                    return total_sold_tokens, total_sold_usdc, total_fee_usdc, final_reason, avg_first_exit, already_recorded
                 # CLOB force-sell 失败 → 链上 redeem 兜底，防止 token 永久锁在 CLOB
                 logger.warning(
                     "close_loop {} CLOB force-sell failed — attempting on-chain redeem for {:.4f} tokens",
@@ -527,7 +562,7 @@ class PositionManager:
                         "close_loop {} redeem fallback recovered {:.4f} USDC from {:.4f} tokens (avg={:.4f})",
                         pos.asset, redeem_outcome.usdc, post_live, redeem_avg,
                     )
-                    return total_sold_tokens, total_sold_usdc, ExitReason.REDEEM_SUCCESS, redeem_avg, already_recorded
+                    return total_sold_tokens, total_sold_usdc, total_fee_usdc, ExitReason.REDEEM_SUCCESS, redeem_avg, already_recorded
                 # 所有兜底均失败 → operator 告警（CRITICAL），抛出专用异常让调用方不要再重试
                 logger.error(
                     "CRITICAL: close_loop {} EXHAUSTED ALL RECOVERY OPTIONS — "
@@ -628,15 +663,23 @@ class PositionManager:
             slip_pct = max(0.0, float(cfg.get(slip_key, 1.0)))
             sell_price = max(0.0001, sell_price * (1.0 - slip_pct / 100.0))
 
-        pnl_pct_preview, _ = self._compute_pnl(pos, sell_price, pos.tokens_bought)
+        dry_exit_fee = self._estimate_exit_fee(pos, sell_price, pos.tokens_bought)
+        pnl_pct_preview, _ = self._compute_pnl(
+            pos, sell_price, pos.tokens_bought, dry_exit_fee,
+        )
 
         if live_trader is None:
             if not already_recorded:
                 pos._trade_recorded = True
                 pos._trade_recorded_reason = close_reason
-                await self._record_trade(pos, sell_price, close_reason, closed_at_override,
-                                        total_sold_tokens=pos.tokens_bought)
-            pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, pos.tokens_bought)
+                await self._record_trade(
+                    pos, sell_price, close_reason, closed_at_override,
+                    total_sold_tokens=pos.tokens_bought,
+                    exit_fee_usdc=dry_exit_fee,
+                )
+            pnl_pct, pnl_usd = self._compute_pnl(
+                pos, sell_price, pos.tokens_bought, dry_exit_fee,
+            )
             pos._last_pnl_pct = pnl_pct
             pos._last_pnl_usd = pnl_usd
             return pnl_pct, pnl_usd
@@ -678,8 +721,9 @@ class PositionManager:
                 await self._record_trade(
                     pos, sell_price, ExitReason.ALREADY_CLOSED, closed_at_override,
                     total_sold_tokens=tokens_at_entry,
+                    exit_fee_usdc=0.0,
                 )
-            pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, tokens_at_entry)
+            pnl_pct, pnl_usd = self._compute_pnl(pos, sell_price, tokens_at_entry, 0.0)
             pos._last_pnl_pct = pnl_pct
             pos._last_pnl_usd = pnl_usd
             return pnl_pct, pnl_usd
@@ -717,16 +761,20 @@ class PositionManager:
                         outcome.fill_price, pos.tokens_bought,
                     )
                     # 记录这笔交易
+                    exit_fee = float(outcome.fee_usdc or 0.0)
                     if not already_recorded:
                         pos._trade_recorded = True
                         pos._trade_recorded_reason = close_reason
                         await self._record_trade(
                             pos, outcome.fill_price, close_reason, closed_at_override,
                             total_sold_tokens=tokens_to_sell,
+                            exit_fee_usdc=exit_fee,
                         )
                     # Bug-4 fix: PnL 分母统一用 tokens_at_entry（入场总量），
                     # 与全额平仓路径（_close_loop）保持一致。
-                    pnl_pct, pnl_usd = self._compute_pnl(pos, outcome.fill_price, tokens_at_entry)
+                    pnl_pct, pnl_usd = self._compute_pnl(
+                        pos, outcome.fill_price, tokens_at_entry, exit_fee,
+                    )
                     pos._last_pnl_pct = pnl_pct
                     pos._last_pnl_usd = pnl_usd
                     return pnl_pct, pnl_usd
@@ -735,6 +783,7 @@ class PositionManager:
         (
             total_sold_tokens,
             total_sold_usdc,
+            total_fee_usdc,
             final_reason,
             avg_exit,
             recorded_by_loop,
@@ -752,8 +801,11 @@ class PositionManager:
             await self._record_trade(
                 pos, avg_exit, pos._trade_recorded_reason, closed_at_override,
                 total_sold_tokens=tokens_at_entry,
+                exit_fee_usdc=total_fee_usdc,
             )
-        pnl_pct, pnl_usd = self._compute_pnl(pos, avg_exit, tokens_at_entry)
+        pnl_pct, pnl_usd = self._compute_pnl(
+            pos, avg_exit, tokens_at_entry, total_fee_usdc,
+        )
         pos._last_pnl_pct = pnl_pct
         pos._last_pnl_usd = pnl_usd
         return pnl_pct, pnl_usd
@@ -773,6 +825,7 @@ class PositionManager:
         final_reason: str = close_reason  # 兜底初始化，所有分支必须显式覆盖
         pnl_pct = 0.0
         pnl_usd = 0.0
+        exit_fee = 0.0
 
         # CRITICAL: capture tokens_at_entry BEFORE any mutation.  This is the
         # authoritative position size for trade recording and PnL computation.
@@ -812,6 +865,7 @@ class PositionManager:
                 if outcome.success:
                     avg_exit = outcome.fill_price
                     final_reason = close_reason
+                    exit_fee = float(outcome.fee_usdc or 0.0)
                     # Invalidate pUSD collateral cache so next entry sees fresh balance
                     live_trader.invalidate_balance_cache()
                 else:
@@ -832,9 +886,14 @@ class PositionManager:
                 if not already_recorded:
                     pos._trade_recorded = True
                     pos._trade_recorded_reason = final_reason
-                    await self._record_trade(pos, avg_exit, final_reason, closed_at_override,
-                                             total_sold_tokens=tokens_at_entry)
-                pnl_pct, pnl_usd = self._compute_pnl(pos, avg_exit, tokens_at_entry)
+                    await self._record_trade(
+                        pos, avg_exit, final_reason, closed_at_override,
+                        total_sold_tokens=tokens_at_entry,
+                        exit_fee_usdc=exit_fee,
+                    )
+                pnl_pct, pnl_usd = self._compute_pnl(
+                    pos, avg_exit, tokens_at_entry, exit_fee,
+                )
             else:
                 # All tokens already sold — raise so caller treats this as a clean
                 # close and clears ctx.position. Previously this silently returned,
@@ -844,19 +903,29 @@ class PositionManager:
                 if not already_recorded:
                     pos._trade_recorded = True
                     pos._trade_recorded_reason = close_reason
-                    await self._record_trade(pos, override_exit_price, close_reason,
-                                             closed_at_override,
-                                             total_sold_tokens=tokens_at_entry)
-                pnl_pct, pnl_usd = self._compute_pnl(pos, override_exit_price, tokens_at_entry)
+                    await self._record_trade(
+                        pos, override_exit_price, close_reason,
+                        closed_at_override,
+                        total_sold_tokens=tokens_at_entry,
+                        exit_fee_usdc=0.0,
+                    )
+                pnl_pct, pnl_usd = self._compute_pnl(
+                    pos, override_exit_price, tokens_at_entry, 0.0,
+                )
                 avg_exit = override_exit_price
                 raise AlreadyClosedError(pos.asset, pnl_pct, pnl_usd)
         else:
             if not already_recorded:
                 pos._trade_recorded = True
                 pos._trade_recorded_reason = close_reason
-                await self._record_trade(pos, override_exit_price, close_reason, closed_at_override,
-                                         total_sold_tokens=tokens_at_entry)
-            pnl_pct, pnl_usd = self._compute_pnl(pos, override_exit_price, tokens_at_entry)
+                await self._record_trade(
+                    pos, override_exit_price, close_reason, closed_at_override,
+                    total_sold_tokens=tokens_at_entry,
+                    exit_fee_usdc=0.0,
+                )
+            pnl_pct, pnl_usd = self._compute_pnl(
+                pos, override_exit_price, tokens_at_entry, 0.0,
+            )
             avg_exit = override_exit_price
 
         pos._last_pnl_pct = pnl_pct
@@ -961,13 +1030,23 @@ class PositionManager:
         close_reason: str,
         closed_at_override: Optional[datetime] = None,
         total_sold_tokens: Optional[float] = None,
+        exit_fee_usdc: float = 0.0,
     ):
         """
         将平仓记录写入 DB (Trade 表) 和 JSONL 备份。
         同时把之前暂存的 Fill 记录的 trade_id 更新为正式 ID。
+
+        pnl_usd / pnl_pct 为扣除双边手续费后的净值；gross_pnl_usd 保留
+        未扣手续费的盈亏，fee_usdc 记录本笔合计手续费。
         """
         filled_tokens = total_sold_tokens if total_sold_tokens is not None else pos.tokens_bought
-        pnl_pct, pnl_usd = self._compute_pnl(pos, exit_price, filled_tokens)
+        ratio = filled_tokens / pos.tokens_bought if pos.tokens_bought > 0 else 1.0
+        entry_fee = float(getattr(pos, "entry_fee_usdc", 0.0) or 0.0) * ratio
+        gross_pnl_usd = filled_tokens * (exit_price - pos.effective_entry_price)
+        total_fee = entry_fee + float(exit_fee_usdc or 0.0)
+        pnl_pct, pnl_usd = self._compute_pnl(
+            pos, exit_price, filled_tokens, exit_fee_usdc,
+        )
 
         from app.database import async_session
         from app.models import EntryRecord, ExitRecord, Fill, Trade
@@ -999,6 +1078,8 @@ class PositionManager:
                 partial_pct=partial_pct,
                 pnl_pct=pnl_pct,
                 pnl_usd=pnl_usd,
+                gross_pnl_usd=gross_pnl_usd,
+                fee_usdc=exit_fee_usdc,
                 entry_record_id=pos.entry_record_id or None,
                 close_reason=close_reason,
                 mode=mode,
@@ -1018,11 +1099,13 @@ class PositionManager:
                 exit_price=exit_price,
                 pnl_pct=pnl_pct,
                 pnl_usd=pnl_usd,
+                gross_pnl_usd=gross_pnl_usd,
+                fee_usdc=total_fee,
                 close_reason=close_reason,
                 bet_usdc=pos.actual_cost_usdc,
                 mode=mode,
                 fills=actual_fills,
-                strategy="end" if (close_reason or "").startswith("END_") else "main",
+                strategy="main",
                 entry_core_agree=int(getattr(pos, "entry_core_agree", 0) or 0),
                 opened_at=pos.opened_at,
                 closed_at=now,

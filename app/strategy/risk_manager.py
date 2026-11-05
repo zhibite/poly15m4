@@ -6,8 +6,8 @@ risk_manager.py — 主策略账户级风控
   - 连续亏损次数上限 + 冷却期
   - 启动时从 DB 恢复当日状态，避免重启后重置风控
 
-只统计主策略（close_reason 不以 END_ 开头）的 ExitRecord。
-末端策略有自己的每日亏损控制。
+只统计主策略的 ExitRecord。历史数据中末端策略的 close_reason 以 END_ 开头，
+仍排除在风控统计之外。
 """
 
 from __future__ import annotations

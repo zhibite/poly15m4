@@ -1423,7 +1423,7 @@ class IndicatorSignalService:
                 "history":       [round(v, 0) for v in oi_h[-30:]],
             },
             "atr": round(atr_val, 4),
-            # Core 6 方向对齐后的共识数量（末端策略 D1 维度需要）
+            # Core 6 方向对齐后的共识数量（供分析/展示使用）
             "core_agree": core_agree,
         }
 

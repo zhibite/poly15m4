@@ -350,7 +350,7 @@ async function loadTrades() {
         <td class="col-price">${Number(lastFill.vwap_after).toFixed(4)}</td>
         <td class="col-price">${t.exit_price != null ? Number(t.exit_price).toFixed(4) : '--'}</td>
         <td class="col-cost">${Number(cumCost).toFixed(2)}</td>
-        <td class="col-fee">${fillList.reduce((s, f) => s + (f.fee_usdc || 0), 0).toFixed(4)}</td>
+        <td class="col-fee">${(t.fee_usdc != null ? Number(t.fee_usdc) : fillList.reduce((s, f) => s + (f.fee_usdc || 0), 0)).toFixed(4)}</td>
         <td class="col-vwap">${Number(lastFill.vwap_after).toFixed(4)}</td>
         <td class="col-cost">${Number(cumCost).toFixed(2)}</td>
         <td class="col-pnl">

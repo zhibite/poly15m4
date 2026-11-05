@@ -2,10 +2,9 @@
 
 基于 Polymarket CLOB v2 API 的量化交易机器人，交易 BTC/ETH 15 分钟 Up/Down 预测市场。
 
-当前包含两套并行策略：
+当前只保留一套主策略：
 
 - **主策略**：窗口前 9 分钟内的信号驱动单仓交易（Core 6 指标共识 + Advanced 5 过滤）
-- **末端顺势策略**：窗口最后 3 分钟（T=12~14.5min）按五维置信度押注高胜率方向
 
 ## 主要变更 (v2 vs v1)
 
@@ -38,14 +37,14 @@ python run.py
 ## 功能
 
 - **主策略**: Core 6 指标（RSI / MACD / VWAP / EMA / Pivot / BBands）共识入场，Advanced 5（Funding / CVD / 清算 / OBI / OI）过滤；动态止盈、固定止损、窗口结算
-- **末端策略**: T=12~14.5min 五维置信度（信号 / 偏离度 / 动能 / 反转可靠性 / 流动性），一次性建仓，硬截止退出
 - **实盘**: CLOB v2 API（FOK 买入、FAK 卖出、链上 redeem 兜底）
+- **手续费**: 成交手续费从 PnL 中扣除，并写入 EntryRecord / ExitRecord / Trade
 - **WebSocket**: 实时策略状态、盘口价格、技术指标推送
 - **认证**: JWT Bearer Token / HttpOnly Cookie
 - **配置**: 运行时热更新（`POST /api/config`），实盘切换需二次确认
 - **分析**: 决策快照 + 表现统计（`/api/analysis/performance`、`/api/analysis/decisions`）
 - **因子模型**: 5 因子压缩（trend/reversion/price/micro/flow），支持 shadow/live 模式与相关性/IC 分析（`/api/analysis/factors`）
-- **风控**: 主策略每日亏损上限、连续亏损冷却；末端策略独立日亏损控制
+- **风控**: 每日亏损上限、连续亏损冷却、单窗口单仓
 
 ## 目录结构
 
@@ -72,9 +71,9 @@ poly15m4/
 │   │   ├── entry_controller.py  # 主策略入场
 │   │   ├── exit_controller.py   # 主策略止盈止损 / 移动止损 / 出场策略
 │   │   ├── position_manager.py  # 平仓/结算/DB 记录
-│   │   ├── risk_manager.py      # 主策略日亏损 / 连续亏损风控
+│   │   ├── risk_manager.py      # 日亏损 / 连续亏损风控
 │   │   ├── factor_model.py      # 5 因子压缩模型
-│   │   └── end_window_*.py      # 末端顺势策略
+│   │   └── liquidity.py         # 盘口 OBI / 深度辅助
 │   └── api/                 # REST API + WebSocket
 ├── templates/               # HTML 页面（login/dashboard/trades/config/indicators）
 ├── docs/                    # 策略文档
@@ -85,7 +84,6 @@ poly15m4/
 
 - 所有策略参数可通过 `POST /api/config` 热更新，并持久化到 `.env`
 - 实盘切换：先 `POST /api/live/confirm`，再在 5 分钟内把 `live_mode` 设为 `true`
-- 末端策略参数：`END_*`（见 `.env.example`），默认 `END_ENABLED=false`
 
 ## 安全说明
 
@@ -99,6 +97,5 @@ poly15m4/
 ## 文档
 
 - [策略优化与 A/B 指南](docs/strategy-optimization.md)
-- [末端顺势策略逻辑](docs/polymarket-end-window-strategy.md)
 - [PnL 计算规则](docs/polymarket-pnl-logic.md)
 - [指标用法参考](docs/1.md)

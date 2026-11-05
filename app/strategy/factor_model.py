@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.strategy.end_window_signal import compute_liquidity_confidence
+from app.strategy.liquidity import compute_liquidity_confidence
 
 
 # ── 数据类 ────────────────────────────────────────────────────────────────────

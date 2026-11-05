@@ -27,12 +27,11 @@ class WindowManager:
     统一管理所有品种的窗口生命周期。
     """
 
-    def __init__(self, market_svc: MarketService, symbols: list[str], entry_ctrl=None, decision_logger=None, end_strategy=None):
+    def __init__(self, market_svc: MarketService, symbols: list[str], entry_ctrl=None, decision_logger=None):
         self._svc = market_svc
         self._symbols = symbols
         self._entry_ctrl = entry_ctrl
         self._decision_logger = decision_logger
-        self._end_strategy = end_strategy
         self._ctxs: Dict[str, WindowContext] = {
             s: WindowContext(
                 asset=s,
@@ -111,7 +110,7 @@ class WindowManager:
                 ctx.market._down_mid = down_mid
             ctx.price_snapshot = PriceSnapshot(up_mid=up_mid, down_mid=down_mid)
 
-            # 末端策略：每分钟追加 UP 价格采样（用于 D3 动能 + D4 反转检测）
+            # 每分钟追加 UP 价格采样（供因子模型 price 因子使用）
             ctx.append_up_sample(up_mid)
 
             # Log new-window discovery WITH real CLOB mid prices (after fetch_prices)
@@ -160,8 +159,6 @@ class WindowManager:
             )
             if self._decision_logger is not None:
                 self._decision_logger.cancel_tracking(prev_id)
-            if self._end_strategy is not None:
-                self._end_strategy.reset(ctx.asset)
         # NOTE: window metadata (open_up/down) is available immediately,
         # but _up_mid/_down_mid are only populated after fetch_prices in tick().
         # The combined "new_window" log is printed in tick() after fetch_prices

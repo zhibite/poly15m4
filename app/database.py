@@ -24,13 +24,28 @@ async def _migrate_if_needed():
             await conn.execute(text("ALTER TABLE trades ADD COLUMN fills INTEGER DEFAULT 1 NOT NULL"))
         if 'strategy' not in columns:
             await conn.execute(text("ALTER TABLE trades ADD COLUMN strategy VARCHAR(8) DEFAULT 'main' NOT NULL"))
-            # 旧数据回填：末端策略的 close_reason 以 END_ 开头
+            # 旧数据回填：历史末端策略的 close_reason 以 END_ 开头
             await conn.execute(text(
                 "UPDATE trades SET strategy = 'end' WHERE close_reason LIKE 'END_%'"
             ))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trades_strategy ON trades (strategy)"))
         if 'entry_core_agree' not in columns:
             await conn.execute(text("ALTER TABLE trades ADD COLUMN entry_core_agree INTEGER DEFAULT 0 NOT NULL"))
+        if 'fee_usdc' not in columns:
+            await conn.execute(text("ALTER TABLE trades ADD COLUMN fee_usdc FLOAT DEFAULT 0 NOT NULL"))
+        if 'gross_pnl_usd' not in columns:
+            await conn.execute(text("ALTER TABLE trades ADD COLUMN gross_pnl_usd FLOAT DEFAULT 0"))
+            # 旧记录没有手续费拆分，gross 与净 pnl 视为相同
+            await conn.execute(text("UPDATE trades SET gross_pnl_usd = pnl_usd"))
+
+        # exit_records: 手续费 / 毛盈亏列（旧库自动补列）
+        er_result = await conn.execute(text("PRAGMA table_info(exit_records)"))
+        er_columns = [row[1] for row in er_result.fetchall()]
+        if 'fee_usdc' not in er_columns:
+            await conn.execute(text("ALTER TABLE exit_records ADD COLUMN fee_usdc FLOAT DEFAULT 0 NOT NULL"))
+        if 'gross_pnl_usd' not in er_columns:
+            await conn.execute(text("ALTER TABLE exit_records ADD COLUMN gross_pnl_usd FLOAT DEFAULT 0"))
+            await conn.execute(text("UPDATE exit_records SET gross_pnl_usd = pnl_usd"))
 
         # decision_snapshots: 因子模型列（旧库自动补列）
         ds_result = await conn.execute(text("PRAGMA table_info(decision_snapshots)"))

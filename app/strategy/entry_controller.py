@@ -21,7 +21,7 @@ from loguru import logger
 
 from app.models import Side
 from app.pm_client import PolymarketClient, estimate_buy_slippage
-from app.strategy.end_window_signal import compute_liquidity_confidence
+from app.strategy.liquidity import compute_liquidity_confidence
 from app.strategy.models import MarketInfo, OpenPosition
 from app.strategy.decision_logger import DecisionLogger
 from app.strategy.factor_model import FactorSnapshot, compute_factor_snapshot
@@ -1140,6 +1140,7 @@ class EntryController:
                 float(result.tokens), float(result.fill_price),
                 float(result.usdc), fee_rate_bps, "live",
                 estimated_price=getattr(result, "estimated_price", False),
+                fee_usdc=float(getattr(result, "fee_usdc", 0.0) or 0.0),
             )
             return True
         else:
@@ -1169,10 +1170,12 @@ class EntryController:
         fill_price = float(Decimal(str(price)) * slip_factor)
         fill_price = min(fill_price, 0.9999)
         tokens = float(Decimal(str(stake)) / Decimal(str(fill_price))) if fill_price > 1e-9 else 0.0
+        entry_fee = stake * fee_rate_bps / 10_000 if fee_rate_bps > 0 else 0.0
         await self._on_entry_success(
             asset, ctx, side, direction, elapsed,
             tokens, fill_price, stake, fee_rate_bps, "dry",
             estimated_price=False,
+            fee_usdc=entry_fee,
         )
 
     async def _fire_retry(self, asset: str, ctx: WindowContext, item) -> None:
@@ -1212,6 +1215,7 @@ class EntryController:
                 float(result.tokens), float(result.fill_price),
                 float(result.usdc), self._params.default_fee_bps, "live",
                 estimated_price=getattr(result, "estimated_price", False),
+                fee_usdc=float(getattr(result, "fee_usdc", 0.0) or 0.0),
             )
             await self._retry_mgr.clear(asset)
         else:
@@ -1236,12 +1240,19 @@ class EntryController:
         fee_rate_bps: int,
         mode: str,
         estimated_price: bool = False,
+        fee_usdc: float = 0.0,
     ) -> None:
         """入场成功后：构建 OpenPosition，保存 Fill，设置止盈止损阈值"""
         mkt = ctx.market
         px_decision = mkt._up_mid if side == Side.UP else mkt._down_mid
         fp = float(fill_price)
         p = self._params
+
+        # Keep the position and DB fee consistent.  Live fills normally carry an
+        # explicit fee; if the exchange omitted it, estimate from the fee rate.
+        fee_usdc = float(fee_usdc or 0.0)
+        if fee_usdc <= 0 and fee_rate_bps > 0:
+            fee_usdc = float(actual_cost) * float(fee_rate_bps) / 10_000.0
 
         pos = OpenPosition(
             asset=asset,
@@ -1259,6 +1270,7 @@ class EntryController:
             window_start=mkt.window_start,
             window_end=mkt.window_end,
             execution_mode=mode,
+            entry_fee_usdc=fee_usdc,
             market=mkt,
         )
 
@@ -1276,7 +1288,10 @@ class EntryController:
         ctx.mark_traded(side)
 
         # 保存 Fill 记录
-        fill_ok = await self._save_fill_record(ctx, pos, mkt, fp, tokens, actual_cost, fee_rate_bps, px_decision, mode)
+        fill_ok = await self._save_fill_record(
+            ctx, pos, mkt, fp, tokens, actual_cost, fee_rate_bps,
+            px_decision, mode, fee_usdc=fee_usdc,
+        )
         if not fill_ok:
             pos._is_orphan_position = True
             ctx.state = PositionState.HAS_POSITION
@@ -1320,13 +1335,15 @@ class EntryController:
         fee_rate_bps: int,
         px_decision: float,
         mode: str,
+        fee_usdc: float = 0.0,
     ) -> bool:
         from app.database import async_session
         from app.models import EntryRecord, Fill
 
         try:
             async with async_session() as db:
-                fee_usdc = actual_cost * fee_rate_bps / 10_000
+                if fee_usdc <= 0 and fee_rate_bps > 0:
+                    fee_usdc = actual_cost * fee_rate_bps / 10_000
                 entry_record = EntryRecord(
                     asset=ctx.asset,
                     condition_id=mkt.condition_id,
