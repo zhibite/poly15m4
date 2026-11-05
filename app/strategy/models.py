@@ -51,7 +51,7 @@ class OpenPosition:
     window_end: datetime
     cost_basis: float = 0.0
     actual_cost_usdc: float = 0.0
-    taker_fee_bps: int = 0
+    taker_fee_rate: float = 0.07
     sell_retry_count: int = 0
     # Prevent _check_exit from re-triggering close while a close is already in progress
     _pending_close: bool = False
@@ -63,6 +63,8 @@ class OpenPosition:
     # ── 单单持仓止盈止损阈值（由 entry_controller 入场时设置）─────────────
     # 止盈阈值（概率%，如 65.0 表示 65%）
     tp_pct: float = 0.0
+    # 止盈目标价 = entry_price * (1 + tp_pct/100)
+    tp_price: float = 0.0
     # 止损阈值（负值，如 -10.0 表示 -10%）
     sl_pct: float = 0.0
 

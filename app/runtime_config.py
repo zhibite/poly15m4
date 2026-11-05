@@ -99,7 +99,7 @@ _runtime: dict = {
     "live_slippage_pct":             float(_env("LIVE_SLIPPAGE_PCT", str(settings.live_slippage_pct))),
     "btc_slippage_pct":              float(_env("BTC_SLIPPAGE_PCT", str(settings.btc_slippage_pct))),
     "eth_slippage_pct":              float(_env("ETH_SLIPPAGE_PCT", str(settings.eth_slippage_pct))),
-    "default_fee_bps":               int(float(_env("DEFAULT_FEE_BPS", str(settings.default_fee_bps)))),
+    "taker_fee_rate":                 float(_env("TAKER_FEE_RATE", str(settings.taker_fee_rate))),
     "min_exit_price":                float(_env("MIN_EXIT_PRICE", str(settings.min_exit_price))),
 
     # 入场价格过滤
@@ -153,6 +153,8 @@ _runtime: dict = {
     "exit_hold_to_settlement":            _env_bool("EXIT_HOLD_TO_SETTLEMENT", False),
     "exit_tp_enabled":                    _env_bool("EXIT_TP_ENABLED", True),
     "exit_sl_enabled":                    _env_bool("EXIT_SL_ENABLED", True),
+    # 观察价止盈：触发后按 tp_price 作为 FAK 限价卖出；跳空到更高价时按更高价成交
+    "tp_observed_exit":                   _env_bool("TP_OBSERVED_EXIT", True),
     # >0 时，窗口 elapsed 超过该秒数后不再触发 TP/SL（交给结算）
     "exit_tp_sl_disable_after_elapsed_sec": float(_env("EXIT_TP_SL_DISABLE_AFTER_ELAPSED_SEC", "0")),
     # 成本缓冲：TP 上移、SL 下移，避免把手续费/滑点算成利润
@@ -196,7 +198,7 @@ _ENV_KEYS: dict[str, str] = {
     "live_slippage_pct":              "LIVE_SLIPPAGE_PCT",
     "btc_slippage_pct":               "BTC_SLIPPAGE_PCT",
     "eth_slippage_pct":               "ETH_SLIPPAGE_PCT",
-    "default_fee_bps":                "DEFAULT_FEE_BPS",
+    "taker_fee_rate":                 "TAKER_FEE_RATE",
     "min_exit_price":                 "MIN_EXIT_PRICE",
     "core_agree_threshold":           "CORE_AGREE_THRESHOLD",
     "core_agree_standard":           "CORE_AGREE_STANDARD",
@@ -236,6 +238,7 @@ _ENV_KEYS: dict[str, str] = {
     "exit_hold_to_settlement":             "EXIT_HOLD_TO_SETTLEMENT",
     "exit_tp_enabled":                     "EXIT_TP_ENABLED",
     "exit_sl_enabled":                     "EXIT_SL_ENABLED",
+    "tp_observed_exit":                    "TP_OBSERVED_EXIT",
     "exit_tp_sl_disable_after_elapsed_sec": "EXIT_TP_SL_DISABLE_AFTER_ELAPSED_SEC",
     "exit_cost_buffer_pct":                "EXIT_COST_BUFFER_PCT",
     "exit_trailing_stop_pct":              "EXIT_TRAILING_STOP_PCT",

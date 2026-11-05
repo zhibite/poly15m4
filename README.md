@@ -37,8 +37,9 @@ python run.py
 ## 功能
 
 - **主策略**: Core 6 指标（RSI / MACD / VWAP / EMA / Pivot / BBands）共识入场，Advanced 5（Funding / CVD / 清算 / OBI / OI）过滤；动态止盈、固定止损、窗口结算
+- **观察价止盈**: 止盈触发后以 `tp_price` 作为 FAK 限价卖出；如果盘口跳空到更高 bid，按实际观察到的更高价成交
 - **实盘**: CLOB v2 API（FOK 买入、FAK 卖出、链上 redeem 兜底）
-- **手续费**: 成交手续费从 PnL 中扣除，并写入 EntryRecord / ExitRecord / Trade
+- **手续费**: 按官方 `shares × fee_rate × p × (1-p)` 计算，从 PnL 中扣除，并写入 EntryRecord / ExitRecord / Trade
 - **WebSocket**: 实时策略状态、盘口价格、技术指标推送
 - **认证**: JWT Bearer Token / HttpOnly Cookie
 - **配置**: 运行时热更新（`POST /api/config`），实盘切换需二次确认
@@ -84,6 +85,8 @@ poly15m4/
 
 - 所有策略参数可通过 `POST /api/config` 热更新，并持久化到 `.env`
 - 实盘切换：先 `POST /api/live/confirm`，再在 5 分钟内把 `live_mode` 设为 `true`
+- 手续费率：`TAKER_FEE_RATE`（默认 0.07；maker 为 0）
+- 观察价止盈：`TP_OBSERVED_EXIT=true`（默认开启）
 
 ## 安全说明
 

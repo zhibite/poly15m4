@@ -62,8 +62,9 @@ class Settings(BaseSettings):
     btc_slippage_pct: float = 1.0   # Per-asset slippage: BTC (higher liquidity → tighter)
     eth_slippage_pct: float = 2.0   # Per-asset slippage: ETH (lower liquidity → wider)
     min_exit_price: float = 0.01
-    # fee_bps: deprecated — use default_fee_bps instead
-    default_fee_bps: int = 30  # Used when fee-rate API call fails
+    # Polymarket crypto taker fee rate: fee = shares * rate * p * (1-p).
+    # Makers pay 0; the reference implementation uses 0.07 for these markets.
+    taker_fee_rate: float = 0.07
 
     model_config = {
         "env_file": ".env",

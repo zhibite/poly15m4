@@ -43,6 +43,7 @@ from py_clob_client_v2 import (
 from py_clob_client_v2.clob_types import OrderArgsV2
 
 from app.config import settings
+from app.fees import taker_fee
 
 # ── Contract addresses (Polygon mainnet, V2) ────────────────────────────────────
 # Consolidated — shared with polygon_usdc.py
@@ -232,22 +233,20 @@ class LiveTrader:
         return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
     @staticmethod
-    def _apply_fee_fallback(result: Optional[FillResult], fee_rate_bps: int) -> Optional[FillResult]:
+    def _apply_fee_fallback(result: Optional[FillResult], fee_rate: float) -> Optional[FillResult]:
         """Estimate a missing CLOB fee from the token's fee rate.
 
         Normal fills include an explicit per-fill ``fee``.  Some FOK responses
         report ``matched`` without fills[] (and therefore without a fee), so we
-        fall back to ``notional * fee_bps / 10_000`` to avoid recording a
-        zero-fee trade.
+        fall back to ``shares * fee_rate * price * (1 - price)`` to avoid
+        recording a zero-fee trade.
         """
         if result is None or not result.success:
             return result
-        if result.fee_usdc > 0 or fee_rate_bps <= 0:
+        if result.fee_usdc > 0 or fee_rate <= 0:
             return result
-        fee = (Decimal(str(result.usdc)) * Decimal(int(fee_rate_bps)) / Decimal(10000)).quantize(
-            Decimal("0.000001"), rounding=ROUND_DOWN,
-        )
-        result.fee_usdc = float(fee)
+        fee = taker_fee(result.tokens, result.fill_price, fee_rate)
+        result.fee_usdc = round(fee, 6)
         return result
 
     async def _get_tick_size(self, token_id: str) -> str:
@@ -271,7 +270,7 @@ class LiveTrader:
         token_id: str,
         size_usdc: float,
         midpoint: float,
-        fee_rate_bps: int = 0,
+        fee_rate: float = 0.0,
         *,
         user_usdc_balance: float = 0.0,
         neg_risk: bool = False,
@@ -320,7 +319,9 @@ class LiveTrader:
         # Raw token amount (no quantize yet)
         tokens_d = Decimal(str(size_usdc)) / limit_price_dec
 
-        # Fallback price for _parse_fill (reference value, not sent to API)
+        # Marketable FAK/FOK limit: the order may fill at a better book price but
+        # must never cross above this limit.  Quantize to the token tick.
+        limit_price_clean = _q(limit_price_dec, tick_size_d)
         limit_price_ref = float(limit_price_dec)
         tokens_ref = float(tokens_d)
 
@@ -339,6 +340,7 @@ class LiveTrader:
                     token_id=token_id,
                     amount=amount_clean,
                     side=Side.BUY,
+                    price=limit_price_clean,
                     order_type=order_type,
                     user_usdc_balance=float(user_usdc_balance) if user_usdc_balance else 0.0,
                 ),
@@ -384,7 +386,7 @@ class LiveTrader:
                             )
                     if fills_fak and result_fak.success:
                         self.invalidate_token_balance_cache(token_id)
-                        return self._apply_fee_fallback(result_fak, fee_rate_bps)
+                        return self._apply_fee_fallback(result_fak, fee_rate)
                     logger.warning(
                         "buy_token FAK fallback also returned no fills for {}",
                         token_id[:12],
@@ -417,7 +419,7 @@ class LiveTrader:
                 )
             if result.success:
                 self.invalidate_token_balance_cache(token_id)
-            return self._apply_fee_fallback(result, fee_rate_bps)
+            return self._apply_fee_fallback(result, fee_rate)
 
         # FOK: poll until fills confirmed.
         resp = await self._poll_fills_until_ready(
@@ -426,7 +428,7 @@ class LiveTrader:
         result = self._parse_fill(resp, tokens_ref, "BUY", tick_size, midpoint)
         if result.success:
             self.invalidate_token_balance_cache(token_id)
-        return self._apply_fee_fallback(result, fee_rate_bps)
+        return self._apply_fee_fallback(result, fee_rate)
 
     # ── Market sell (FAK) ──────────────────────────────────────────────────────
     async def sell_token(
@@ -434,12 +436,13 @@ class LiveTrader:
         token_id: str,
         tokens: float,
         midpoint: float,
-        fee_rate_bps: int = 0,
+        fee_rate: float = 0.0,
         *,
         neg_risk: bool = False,
         user_usdc_balance: Optional[float] = None,
         slippage_pct: Optional[float] = None,
         max_price: Optional[float] = None,
+        limit_price: Optional[float] = None,
     ) -> Optional[FillResult]:
         """
         Market SELL via FAK. Amount = number of tokens.
@@ -463,8 +466,31 @@ class LiveTrader:
             )
 
         slip = Decimal(str(slippage_pct if slippage_pct is not None else self.slippage_pct))
-        limit_price_dec = Decimal(str(midpoint)) * (Decimal("1") - slip / Decimal("100"))
+        if limit_price is not None and float(limit_price) > 0:
+            # Observed-price exit: sell at/above this target, but never accept a
+            # worse price.  A gap above the target fills at the better bid.
+            limit_price_dec = Decimal(str(limit_price))
+        else:
+            limit_price_dec = Decimal(str(midpoint)) * (Decimal("1") - slip / Decimal("100"))
+            # Better marketable floor: use the actual best bid, not the midpoint.
+            # This prevents a stop-loss/forced-exit FAK from sitting above the
+            # bid and failing to fill.
+            if self._pm_client is not None:
+                try:
+                    book = await self._pm_client.get_orderbook(token_id)
+                    bids = (book or {}).get("bids") or []
+                    best_bid = max(
+                        (float(lv.get("price", 0)) for lv in bids if float(lv.get("price", 0)) > 0),
+                        default=0.0,
+                    )
+                    if best_bid > 0:
+                        limit_price_dec = Decimal(str(best_bid)) * (Decimal("1") - slip / Decimal("100"))
+                        if limit_price_dec < Decimal(str(tick_size)):
+                            limit_price_dec = Decimal(str(best_bid))
+                except Exception:
+                    pass
         limit_price_dec = max(Decimal("0.0001"), min(Decimal("0.9999"), limit_price_dec))
+        limit_price_clean = _q(limit_price_dec, tick_size_d)
 
         # R13: sell price upper bound check — reject if limit exceeds max_price.
         # This is symmetric with buy's max_entry_price guard.
@@ -550,6 +576,7 @@ class LiveTrader:
                     token_id=token_id,
                     amount=tokens_clean,
                     side=Side.SELL,
+                    price=limit_price_clean,
                     order_type=OrderType.FAK,
                     user_usdc_balance=float(user_usdc_balance) if user_usdc_balance else 0.0,
                 ),
@@ -585,7 +612,7 @@ class LiveTrader:
                         fill_price=limit_price_ref,
                         success=True,
                         error="",
-                    ), fee_rate_bps)
+                    ), fee_rate)
 
             # ── Balance-diff shows no fill: classify error and retry ──────────────
             is_balance_error = "status=400" in exc_str and "balance" in exc_str.lower()
@@ -631,6 +658,7 @@ class LiveTrader:
                                 token_id=token_id,
                                 amount=safe_tokens,
                                 side=Side.SELL,
+                                price=limit_price_clean,
                                 order_type=OrderType.FAK,
                                 user_usdc_balance=float(user_usdc_balance) if user_usdc_balance else 0.0,
                             ),
@@ -663,7 +691,7 @@ class LiveTrader:
                             self.invalidate_token_balance_cache(token_id)
                             self.invalidate_balance_cache()
                         resp = resp_retry
-                        return self._apply_fee_fallback(result, fee_rate_bps)
+                        return self._apply_fee_fallback(result, fee_rate)
                     except Exception as exc_retry:
                         # Balance-diff check before re-raising: the order may have filled on-chain
                         # despite the exception (same race as the primary path above).
@@ -685,7 +713,7 @@ class LiveTrader:
                                     fill_price=limit_price_ref,
                                     success=True,
                                     error="",
-                                ), fee_rate_bps)
+                                ), fee_rate)
                         logger.warning("sell_token retry after reduce also failed: {}", exc_retry)
                         return FillResult("", 0, 0, midpoint, False, str(exc_retry))
                 else:
@@ -750,7 +778,7 @@ class LiveTrader:
         if result.success:
             self.invalidate_token_balance_cache(token_id)
             self.invalidate_balance_cache()  # also refresh pUSD collateral balance for next entry
-        return self._apply_fee_fallback(result, fee_rate_bps)
+        return self._apply_fee_fallback(result, fee_rate)
 
     async def _poll_fills_until_ready(
         self,

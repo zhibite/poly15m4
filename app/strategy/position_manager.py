@@ -18,6 +18,7 @@ from typing import Optional
 from loguru import logger
 from sqlalchemy import update
 
+from app.fees import taker_fee
 from app.models import Side
 from app.pm_client import PolymarketClient
 from app.runtime_config import get_config
@@ -160,17 +161,17 @@ class PositionManager:
         return net_pnl_pct, net_pnl_usd
 
     @staticmethod
-    def _fee_bps_for(pos: OpenPosition) -> int:
-        bps = int(getattr(pos, "taker_fee_bps", 0) or 0)
-        if bps <= 0:
-            bps = int(float(get_config().get("default_fee_bps", 30)))
-        return max(0, bps)
+    def _fee_rate_for(pos: OpenPosition) -> float:
+        rate = float(getattr(pos, "taker_fee_rate", 0.0) or 0.0)
+        if rate <= 0:
+            rate = float(get_config().get("taker_fee_rate", 0.07))
+        return max(0.0, rate)
 
     def _estimate_exit_fee(self, pos: OpenPosition, exit_price: float, tokens: float) -> float:
         """Fee estimate for dry-run / missing CLOB fee data."""
         if tokens <= 0 or exit_price <= 0:
             return 0.0
-        return max(0.0, exit_price * tokens * self._fee_bps_for(pos) / 10_000.0)
+        return taker_fee(tokens, exit_price, self._fee_rate_for(pos))
 
     def closed_pnl(
         self, pos: OpenPosition, exit_price: float
@@ -226,18 +227,24 @@ class PositionManager:
         sell_price: float,
         neg_risk: bool,
         live_trader,
+        limit_price: Optional[float] = None,
     ) -> SellOutcome:
         """
         执行一轮 CLOB sell。
         始终返回 SellOutcome：成功时 success=True，失败时 success=False 并附带 error。
         caller 根据 outcome.success 判断是否走 redeem fallback。
+
+        limit_price: observed-price TP target; passed to the FAK order so a gap
+        above the target fills at the better bid while a bid below the target
+        does not fill.
         """
         result = await live_trader.sell_token(
             pos.token_id_bought,
             tokens_to_sell,
             sell_price,
-            self._fee_bps_for(pos),
+            self._fee_rate_for(pos),
             neg_risk=neg_risk,
+            limit_price=limit_price,
             # user_usdc_balance is intentionally omitted for SELL orders.
             # The CLOB validates SELL against token balance (not pUSD), so passing a
             # human-unit pUSD value would be incorrectly interpreted as micro-units by
@@ -308,6 +315,7 @@ class PositionManager:
         tokens_at_entry: float,
         close_reason: str = ExitReason.TAKE_PROFIT,
         closed_at_override: Optional[datetime] = None,
+        limit_price: Optional[float] = None,
     ) -> tuple[float, float, float, str, float, bool]:
         """
         循环执行 CLOB sell，直到余额清零或超过最大轮数。
@@ -374,6 +382,7 @@ class PositionManager:
 
             outcome = await self._clob_exit(
                 pos, tokens_to_sell, sell_price, neg_risk, live_trader,
+                limit_price=limit_price,
             )
 
             # ── dust_skipped：余额低于 tick_size ──────────────────────────────
@@ -734,6 +743,21 @@ class PositionManager:
         # own balance accounting, but trade records always use tokens_at_entry.
         tokens_at_entry = pos.tokens_bought
 
+        # Observed-price TP (reference: 06.poly5mAll): sell with a FAK limit at
+        # the TP target.  If the bid gapped above the target, the fill is at the
+        # better observed bid; if the bid is below the target, the order does not
+        # fill and will be retried/settled later.
+        observed_tp_limit: Optional[float] = None
+        if (
+            close_reason == ExitReason.TAKE_PROFIT
+            and bool(get_config().get("tp_observed_exit", True))
+        ):
+            target = float(getattr(pos, "tp_price", 0.0) or 0.0)
+            if target <= 0:
+                target = pos.effective_entry_price * (1.0 + pos.tp_pct / 100.0)
+            if target > 0:
+                observed_tp_limit = target
+
         # ── 部分平仓：仅卖出 50% ──────────────────────────────────────────────
         if partial_close_pct and partial_close_pct > 0 and live_trader is not None:
             tokens_to_sell = tokens_at_entry * partial_close_pct
@@ -744,6 +768,7 @@ class PositionManager:
             if tokens_to_sell > 1e-9:
                 outcome = await self._clob_exit(
                     pos, tokens_to_sell, sell_price, neg_risk, live_trader,
+                    limit_price=observed_tp_limit,
                 )
                 if outcome.success:
                     # 更新持仓：减少 token 数量和成本
@@ -791,6 +816,7 @@ class PositionManager:
             pos, sell_price, neg_risk, live_trader,
             already_recorded, tokens_at_entry,
             close_reason, closed_at_override,
+            limit_price=observed_tp_limit,
         )
 
         # ── 记录平仓 ────────────────────────────────────────────────────────

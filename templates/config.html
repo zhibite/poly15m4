@@ -400,9 +400,16 @@
     </div>
     <div class="row">
       <div class="field" style="max-width:320px">
-        <label>手续费 (bps)</label>
-        <input type="number" id="default_fee_bps" step="1" min="1" max="500">
-        <span class="hint">订单手续费基准（默认 30 bps），覆盖自动计算值</span>
+        <label>手续费率 (taker)</label>
+        <input type="number" id="taker_fee_rate" step="0.01" min="0" max="0.5">
+        <span class="hint">官方公式：shares × rate × p × (1-p)，默认 0.07；maker=0</span>
+      </div>
+      <div class="field" style="max-width:260px">
+        <label>观察价止盈</label>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
+          <input type="checkbox" id="tp_observed_exit">
+          <span>TP 触发后按 tp_price 限价卖出</span>
+        </label>
       </div>
     </div>
   </div>
@@ -528,7 +535,7 @@ function validateConfig(body) {
 async function loadConfig() {
   const d = await api('/api/config');
   if (!d) return;
-  const boolFields = new Set(['live_mode', 'asset_btc_enabled', 'asset_eth_enabled']);
+  const boolFields = new Set(['live_mode', 'asset_btc_enabled', 'asset_eth_enabled', 'tp_observed_exit']);
   const numFields = [
     'market_interval_slug',
     'market_duration_sec',
@@ -545,7 +552,7 @@ async function loadConfig() {
     'btc_slippage_pct', 'eth_slippage_pct',
     'settle_grace_sec', 'max_settle_wait_sec',
     'sell_max_retry_count',
-    'default_fee_bps',
+    'taker_fee_rate',
     'signal_tp_base_pct', 'signal_tp_range_pct',
     'signal_tp_entry_price_min', 'signal_tp_entry_price_max',
     'signal_tp_tighten_per_add_pct',
@@ -596,7 +603,7 @@ async function saveConfig() {
     'btc_slippage_pct', 'eth_slippage_pct',
     'settle_grace_sec', 'max_settle_wait_sec',
     'sell_max_retry_count',
-    'default_fee_bps',
+    'taker_fee_rate',
     'signal_tp_base_pct', 'signal_tp_range_pct',
     'signal_tp_entry_price_min', 'signal_tp_entry_price_max',
     'signal_tp_tighten_per_add_pct',
@@ -615,6 +622,7 @@ async function saveConfig() {
   body.live_mode = document.getElementById('live_mode').checked;
   body.asset_btc_enabled = document.getElementById('asset_btc_enabled').checked;
   body.asset_eth_enabled = document.getElementById('asset_eth_enabled').checked;
+  body.tp_observed_exit = document.getElementById('tp_observed_exit').checked;
 
   const err = validateConfig(body);
   if (err) { showMsg('cfg-msg', err, false); return; }

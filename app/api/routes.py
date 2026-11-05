@@ -69,7 +69,7 @@ _CONFIG_BOUNDS: dict[str, tuple] = {
     "min_exit_price": (0.0, 0.5),
     "settle_grace_sec": (10, 3600),
     "max_settle_wait_sec": (60, 7200),
-    "default_fee_bps": (1.0, 500.0),
+    "taker_fee_rate": (0.0, 0.50),
     "market_duration_sec": (120.0, 86400.0),
     "live_mode": (0, 1),
     "sell_max_retry_count": (1, 10),
@@ -153,6 +153,7 @@ _BOOL_KEYS_BODY = frozenset(
         "exit_hold_to_settlement",
         "exit_tp_enabled",
         "exit_sl_enabled",
+        "tp_observed_exit",
     }
 )
 

@@ -19,6 +19,7 @@ from typing import Optional
 
 from loguru import logger
 
+from app.fees import taker_fee
 from app.models import Side
 from app.pm_client import PolymarketClient, estimate_buy_slippage
 from app.strategy.liquidity import compute_liquidity_confidence
@@ -44,7 +45,7 @@ class EntryParams:
     live_mode: bool = False
     btc_slippage_pct: float = 1.0
     eth_slippage_pct: float = 2.0
-    default_fee_bps: int = 30
+    taker_fee_rate: float = 0.07
     min_exit_price: float = 0.01
     market_duration_sec: int = 900
 
@@ -187,7 +188,7 @@ class EntryController:
         p.live_mode = lm
         p.btc_slippage_pct = float(cfg.get("btc_slippage_pct", 1.0))
         p.eth_slippage_pct = float(cfg.get("eth_slippage_pct", 2.0))
-        p.default_fee_bps = int(cfg.get("default_fee_bps", 30))
+        p.taker_fee_rate = float(cfg.get("taker_fee_rate", 0.07))
         p.min_exit_price = float(cfg.get("min_exit_price", 0.01))
 
         # 信号驱动参数
@@ -290,6 +291,7 @@ class EntryController:
         """
         p = self._params
         pos.tp_pct = self._tp_pct_for_price(entry_price)
+        pos.tp_price = entry_price * (1.0 + pos.tp_pct / 100.0)
         pos.sl_pct = p.sl_base_pct
         # 锚点价：入场时等于有效入场价，用于 PnL 百分比的基准计算
         pos.anchor_price = entry_price
@@ -1030,13 +1032,8 @@ class EntryController:
             return False
         p = self._params
         slip = p.btc_slippage_pct if asset == "BTC" else p.eth_slippage_pct
-        fee_rate_bps = p.default_fee_bps
         token_id = mkt.token_up_id if side == Side.UP else mkt.token_down_id
-
-        try:
-            fee_rate_bps = await self._pm.get_fee_rate_bps(token_id)
-        except Exception:
-            logger.warning("fee_rate_bps unavailable — using default {} bps", fee_rate_bps)
+        fee_rate = p.taker_fee_rate
 
         # 实盘模式必须真的有 LiveTrader；否则绝不能静默降级为 dry 模拟，
         # 否则 UI 显示 live_mode=True 但实际只记录了模拟成交。
@@ -1076,11 +1073,11 @@ class EntryController:
                         asset, direction, slip, slip_est.pct_of_depth, slip_est.sufficient,
                     )
             return await self._live_entry(
-                asset, ctx, side, direction, price, stake, elapsed, slip, fee_rate_bps,
+                asset, ctx, side, direction, price, stake, elapsed, slip, fee_rate,
             )
         else:
             await self._dry_entry(
-                asset, ctx, side, direction, price, stake, elapsed, slip, fee_rate_bps,
+                asset, ctx, side, direction, price, stake, elapsed, slip, fee_rate,
             )
             return True
 
@@ -1094,12 +1091,12 @@ class EntryController:
         stake: float,
         elapsed: float,
         slip: float,
-        fee_rate_bps: int,
+        fee_rate: float,
     ) -> bool:
         """实盘入场"""
         mkt = ctx.market
-        fee_factor = 1.0 + fee_rate_bps / 10_000
-        actual_stake = stake * fee_factor
+        est_shares = stake / price if price > 0 else 0.0
+        actual_stake = stake + taker_fee(est_shares, price, fee_rate)
         token_id = mkt.token_up_id if side == Side.UP else mkt.token_down_id
 
         self._live_trader.invalidate_balance_cache()
@@ -1118,7 +1115,7 @@ class EntryController:
 
         try:
             result = await self._live_trader.buy_token(
-                token_id, stake, price, fee_rate_bps,
+                token_id, stake, price, fee_rate,
                 user_usdc_balance=bal_micro / 1_000_000,
                 neg_risk=mkt.neg_risk,
                 slippage_pct=slip,
@@ -1138,7 +1135,7 @@ class EntryController:
             await self._on_entry_success(
                 asset, ctx, side, direction, elapsed,
                 float(result.tokens), float(result.fill_price),
-                float(result.usdc), fee_rate_bps, "live",
+                float(result.usdc), fee_rate, "live",
                 estimated_price=getattr(result, "estimated_price", False),
                 fee_usdc=float(getattr(result, "fee_usdc", 0.0) or 0.0),
             )
@@ -1163,17 +1160,17 @@ class EntryController:
         stake: float,
         elapsed: float,
         slip: float,
-        fee_rate_bps: int,
+        fee_rate: float,
     ) -> None:
         """模拟入场"""
         slip_factor = Decimal("1") + Decimal(str(slip)) / Decimal("100")
         fill_price = float(Decimal(str(price)) * slip_factor)
         fill_price = min(fill_price, 0.9999)
         tokens = float(Decimal(str(stake)) / Decimal(str(fill_price))) if fill_price > 1e-9 else 0.0
-        entry_fee = stake * fee_rate_bps / 10_000 if fee_rate_bps > 0 else 0.0
+        entry_fee = taker_fee(tokens, fill_price, fee_rate)
         await self._on_entry_success(
             asset, ctx, side, direction, elapsed,
-            tokens, fill_price, stake, fee_rate_bps, "dry",
+            tokens, fill_price, stake, fee_rate, "dry",
             estimated_price=False,
             fee_usdc=entry_fee,
         )
@@ -1203,7 +1200,7 @@ class EntryController:
 
         result = await self._live_trader.buy_token(
             mkt.token_up_id if side == Side.UP else mkt.token_down_id,
-            stake, retry_price, self._params.default_fee_bps,
+            stake, retry_price, self._params.taker_fee_rate,
             user_usdc_balance=bal_micro / 1_000_000,
             neg_risk=mkt.neg_risk,
             slippage_pct=slip,
@@ -1213,7 +1210,7 @@ class EntryController:
             await self._on_entry_success(
                 asset, ctx, side, direction, elapsed,
                 float(result.tokens), float(result.fill_price),
-                float(result.usdc), self._params.default_fee_bps, "live",
+                float(result.usdc), self._params.taker_fee_rate, "live",
                 estimated_price=getattr(result, "estimated_price", False),
                 fee_usdc=float(getattr(result, "fee_usdc", 0.0) or 0.0),
             )
@@ -1237,7 +1234,7 @@ class EntryController:
         tokens: float,
         fill_price: float,
         actual_cost: float,
-        fee_rate_bps: int,
+        fee_rate: float,
         mode: str,
         estimated_price: bool = False,
         fee_usdc: float = 0.0,
@@ -1249,10 +1246,11 @@ class EntryController:
         p = self._params
 
         # Keep the position and DB fee consistent.  Live fills normally carry an
-        # explicit fee; if the exchange omitted it, estimate from the fee rate.
+        # explicit fee; if the exchange omitted it, estimate with the official
+        # Polymarket formula: shares * rate * price * (1 - price).
         fee_usdc = float(fee_usdc or 0.0)
-        if fee_usdc <= 0 and fee_rate_bps > 0:
-            fee_usdc = float(actual_cost) * float(fee_rate_bps) / 10_000.0
+        if fee_usdc <= 0 and fee_rate > 0:
+            fee_usdc = taker_fee(tokens, fp, fee_rate)
 
         pos = OpenPosition(
             asset=asset,
@@ -1264,7 +1262,7 @@ class EntryController:
             tokens_bought=tokens,
             bet_usdc=actual_cost,
             actual_cost_usdc=actual_cost,
-            taker_fee_bps=fee_rate_bps,
+            taker_fee_rate=fee_rate,
             min_exit_price=p.min_exit_price,
             opened_at=datetime.now(timezone.utc),
             window_start=mkt.window_start,
@@ -1289,7 +1287,7 @@ class EntryController:
 
         # 保存 Fill 记录
         fill_ok = await self._save_fill_record(
-            ctx, pos, mkt, fp, tokens, actual_cost, fee_rate_bps,
+            ctx, pos, mkt, fp, tokens, actual_cost, fee_rate,
             px_decision, mode, fee_usdc=fee_usdc,
         )
         if not fill_ok:
@@ -1332,7 +1330,7 @@ class EntryController:
         fp: float,
         tokens: float,
         actual_cost: float,
-        fee_rate_bps: int,
+        fee_rate: float,
         px_decision: float,
         mode: str,
         fee_usdc: float = 0.0,
@@ -1342,8 +1340,8 @@ class EntryController:
 
         try:
             async with async_session() as db:
-                if fee_usdc <= 0 and fee_rate_bps > 0:
-                    fee_usdc = actual_cost * fee_rate_bps / 10_000
+                if fee_usdc <= 0 and fee_rate > 0:
+                    fee_usdc = taker_fee(tokens, fp, fee_rate)
                 entry_record = EntryRecord(
                     asset=ctx.asset,
                     condition_id=mkt.condition_id,

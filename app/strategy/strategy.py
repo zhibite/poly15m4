@@ -93,7 +93,6 @@ class SinglePositionStrategy:
         self.btc_slippage_pct: float = 1.0
         self.eth_slippage_pct: float = 2.0
         self.min_exit_price: float = 0.01
-        self.default_fee_bps: int = 30
         self.sell_max_retry_count: int = 3
 
         # ── Binance 数据缓存（缓变数据，避免每 tick 重复请求）────────────────
@@ -214,7 +213,6 @@ class SinglePositionStrategy:
         self.eth_slippage_pct = float(cfg.get("eth_slippage_pct", 2.0))
         self.min_exit_price = float(cfg.get("min_exit_price", 0.01))
         self.sell_max_retry_count = int(cfg.get("sell_max_retry_count", 3))
-        self.default_fee_bps = int(cfg.get("default_fee_bps", 30))
 
         # 信号驱动入场参数
         self.core_agree_threshold = int(float(cfg.get("core_agree_threshold", 3)))

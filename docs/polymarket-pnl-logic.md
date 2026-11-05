@@ -95,16 +95,23 @@ def closed_pnl(pos: OpenPosition, exit_price: float) -> float:
 
 ```text
 gross_pnl_usd = 卖出数量 × (exit_price - effective_entry_price)
-fee_usdc      = 入场手续费 + 出场手续费
-pnl_usd       = gross_pnl_usd - fee_usdc
-pnl_pct       = pnl_usd / (实际投入 + 入场手续费) × 100
+
+entry_fee = 入场数量 × fee_rate × entry_price × (1 - entry_price)
+exit_fee  = 出场数量 × fee_rate × exit_price  × (1 - exit_price)
+
+fee_usdc = entry_fee + exit_fee
+pnl_usd  = gross_pnl_usd - fee_usdc
+pnl_pct  = pnl_usd / (实际投入 + entry_fee) × 100
 ```
+
+Polymarket 加密类市场默认 taker `fee_rate = 0.07`（7%），maker 为 0；
+该费率可在 `TAKER_FEE_RATE` / 运行时配置中调整。
 
 - `EntryRecord.fee_usdc` / `Fill.fee_usdc`：入场手续费
 - `ExitRecord.fee_usdc` / `ExitRecord.gross_pnl_usd`：出场手续费 / 毛盈亏
 - `Trade.fee_usdc` / `Trade.gross_pnl_usd`：双边手续费合计 / 毛盈亏
-- 实盘优先使用 CLOB `fills[].fee`；拿不到时用 `fee_rate_bps` 估算
-- dry 模式按同样的费率模拟入场和出场手续费
+- 实盘优先使用 CLOB `fills[].fee`；拿不到时按上述公式估算
+- dry 模式按同样的公式模拟入场和出场手续费
 - 链上 redeem 的 gas 费目前未计入 PnL
 
 ## 总结
